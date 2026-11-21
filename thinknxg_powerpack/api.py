@@ -759,9 +759,10 @@ def get_bulk_stock_item_details(items, warehouse: str = None, doctype: str = 'St
     feature_map = {
         'Stock Reconciliation': 'enable_stock_reconciliation_bulk_selection',
         'Stock Entry': 'enable_stock_entry_bulk_selection',
-        # thinkNXG Rental child tables (Job Type.rental_items, Hire Order Contract.materials)
+        # thinkNXG Rental child tables (Job Type.rental_items, Hire Order Contract.materials, Hire Order.items)
         'Job Type': 'enable_rental_items_bulk_selection',
-        'Hire Order Contract': 'enable_materials_bulk_selection'
+        'Hire Order Contract': 'enable_materials_bulk_selection',
+        'Hire Order': 'enable_hire_order_items_bulk_selection'
     }
 
     feature_name = feature_map.get(doctype)

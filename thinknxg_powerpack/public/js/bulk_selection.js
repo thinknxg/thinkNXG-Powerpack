@@ -123,6 +123,24 @@ const BULK_SELECTION_CONFIG = {
         price_list_field: null,
         price_label: null
     },
+    'Hire Order': {
+        setting_field: 'enable_hire_order_items_bulk_selection',
+        table_field: 'items',
+        requires_warehouse: false,
+        has_taxes: false,
+        has_price: false,
+        show_profit: false,
+        show_cost: false,
+        is_stock_doctype: true,
+        is_rental_doctype: true,
+        is_purchase_doctype: false,
+        customer_field: null,
+        supplier_field: null,
+        warehouse_field: null,
+        item_warehouse_field: null,
+        price_list_field: null,
+        price_label: null
+    },
     'Hire Order Contract': {
         setting_field: 'enable_materials_bulk_selection',
         table_field: 'materials',
