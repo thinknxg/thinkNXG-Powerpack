@@ -1,0 +1,818 @@
+{
+ "actions": [],
+ "creation": "2026-01-29 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "appearance_tab",
+  "theme_section",
+  "enable_compact_theme",
+  "compact_theme_description",
+  "company_border_section",
+  "company_borders",
+  "company_border_description",
+  "sales_pos_tab",
+  "sales_powerup_section",
+  "enable_quotation_powerup",
+  "enable_sales_order_powerup",
+  "column_break_sales_1",
+  "enable_sales_invoice_powerup",
+  "enable_pos_invoice_powerup",
+  "sales_powerup_description",
+  "sales_powerup_details_section",
+  "sales_visible_to_role",
+  "column_break_1",
+  "show_stock_info",
+  "show_valuation_rate",
+  "show_profit_indicator",
+  "column_break_2",
+  "show_last_purchase",
+  "show_last_sale",
+  "show_last_sale_to_customer",
+  "sales_powerup_shown_by_default",
+  "column_break_margin_bands",
+  "sales_margin_low_below",
+  "sales_margin_medium_below",
+  "sales_margin_good_below",
+  "bulk_selection_section",
+  "enable_quotation_bulk_selection",
+  "enable_sales_order_bulk_selection",
+  "enable_purchase_order_bulk_selection",
+  "column_break_bulk_1",
+  "enable_sales_invoice_bulk_selection",
+  "enable_stock_reconciliation_bulk_selection",
+  "enable_stock_entry_bulk_selection",
+  "quick_pay_section",
+  "enable_quick_pay",
+  "enable_quick_pay_mpesa",
+  "qp_column_break",
+  "qp_auto_create_invoice",
+  "qp_auto_submit_invoice",
+  "qp_update_stock",
+  "lens_section",
+  "enable_lens",
+  "lens_description",
+  "copy_as_image_section",
+  "enable_copy_as_image",
+  "rate_price_picker_section",
+  "enable_rate_price_picker",
+  "pricing_tab",
+  "min_selling_price_section",
+  "enable_min_selling_price",
+  "min_selling_price_description",
+  "min_selling_price_default_basis",
+  "min_selling_price_default_percent",
+  "min_selling_price_override_role",
+  "min_selling_price_column_break",
+  "min_selling_price_skip_if_pricing_rule",
+  "min_selling_price_whole_sale",
+  "min_selling_price_whole_sale_diagram",
+  "msp_approval_quotation",
+  "msp_approval_sales_order",
+  "msp_approval_sales_invoice",
+  "msp_approval_delivery_note",
+  "min_selling_price_rules_section",
+  "min_selling_price_rules",
+  "items_tab",
+  "item_search_powerup_section",
+  "enable_item_search_powerup",
+  "item_search_powerup_description",
+  "item_list_powerup_section",
+  "enable_item_list_powerup",
+  "item_list_powerup_description",
+  "withholding_tab",
+  "kenya_withholding_section",
+  "enable_kenya_withholding",
+  "withholding_vat_accounts",
+  "withholding_rules",
+  "withholding_exemptions",
+  "system_tab",
+  "payment_reconciliation_section",
+  "enable_payment_reconciliation_powerup",
+  "payment_reconciliation_description",
+  "warnings_section",
+  "enable_warnings",
+  "warnings_description",
+  "email_group_section",
+  "enable_email_group_powerup",
+  "email_group_description",
+  "validation_section",
+  "enable_duplicate_tax_id_check",
+  "tax_id_validation_description",
+  "column_break_validation_1",
+  "prevent_etr_invoice_cancellation",
+  "etr_validation_description",
+  "document_naming_section",
+  "enable_branch_naming_codes",
+  "column_break_document_naming",
+  "branch_naming_description",
+  "public_link_section",
+  "public_link_page",
+  "column_break_public_link_0",
+  "public_link_description",
+  "public_link_banner_section",
+  "public_link_top_banner",
+  "public_link_top_banner_link",
+  "public_link_hide_header",
+  "column_break_public_link_1",
+  "public_link_header_content",
+  "public_link_footer_content"
+ ],
+ "fields": [
+  {
+   "fieldname": "appearance_tab",
+   "fieldtype": "Tab Break",
+   "label": "Appearance"
+  },
+  {
+   "fieldname": "theme_section",
+   "fieldtype": "Section Break",
+   "label": "Theme"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_compact_theme",
+   "fieldtype": "Check",
+   "label": "Enable Compact Theme"
+  },
+  {
+   "fieldname": "compact_theme_description",
+   "fieldtype": "HTML",
+   "label": "Description",
+   "options": "<p class=\"text-muted\">Reduces line-height and input sizes for a more compact, information-dense layout.</p>"
+  },
+  {
+   "fieldname": "company_border_section",
+   "fieldtype": "Section Break",
+   "label": "Company Border Indicator"
+  },
+  {
+   "fieldname": "company_borders",
+   "fieldtype": "Table",
+   "label": "Company Borders",
+   "options": "Powerpack Company Border"
+  },
+  {
+   "fieldname": "company_border_description",
+   "fieldtype": "HTML",
+   "label": "Description",
+   "options": "<p class=\"text-muted\">Add a colored border to the top and/or bottom of the site for each company. The border matching the user's default company is shown, making it easy to tell at a glance which company you are working in.</p>"
+  },
+  {
+   "fieldname": "sales_pos_tab",
+   "fieldtype": "Tab Break",
+   "label": "Sales"
+  },
+  {
+   "fieldname": "sales_powerup_section",
+   "fieldtype": "Section Break",
+   "label": "Sales Powerup"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_quotation_powerup",
+   "fieldtype": "Check",
+   "label": "Enable for Quotation",
+   "description": "Enable sales powerup features for Quotation documents"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_sales_order_powerup",
+   "fieldtype": "Check",
+   "label": "Enable for Sales Order",
+   "description": "Enable sales powerup features for Sales Order documents"
+  },
+  {
+   "fieldname": "column_break_sales_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_sales_invoice_powerup",
+   "fieldtype": "Check",
+   "label": "Enable for Sales Invoice",
+   "description": "Enable sales powerup features for Sales Invoice documents"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_pos_invoice_powerup",
+   "fieldtype": "Check",
+   "label": "Enable for POS Invoice",
+   "description": "Enable sales powerup features for POS Invoice documents"
+  },
+  {
+   "fieldname": "sales_powerup_description",
+   "fieldtype": "HTML",
+   "label": "Description",
+   "options": "<p class=\"text-muted\">Display additional item information below each sales item including current stock, valuation rate, last purchase price, and sales history.</p>"
+  },
+  {
+   "collapsible": 1,
+   "depends_on": "eval:doc.enable_quotation_powerup || doc.enable_sales_order_powerup || doc.enable_sales_invoice_powerup || doc.enable_pos_invoice_powerup",
+   "fieldname": "sales_powerup_details_section",
+   "fieldtype": "Section Break",
+   "label": "Sales Powerup - Detailed Settings"
+  },
+  {
+   "fieldname": "sales_visible_to_role",
+   "fieldtype": "Link",
+   "label": "Visible to Role",
+   "options": "Role",
+   "description": "Select which role can see the detailed item information (valuation rate, profit indicator, etc.)"
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "fieldname": "show_stock_info",
+   "fieldtype": "Check",
+   "label": "Show Stock Information",
+   "description": "Display current stock levels below item lines"
+  },
+  {
+   "default": "1",
+   "fieldname": "show_valuation_rate",
+   "fieldtype": "Check",
+   "label": "Show Valuation Rate",
+   "description": "Display item valuation/cost rate"
+  },
+  {
+   "default": "1",
+   "fieldname": "show_profit_indicator",
+   "fieldtype": "Check",
+   "label": "Show Profit Indicator",
+   "description": "Show profit margin percentage and amount"
+  },
+  {
+   "fieldname": "column_break_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "fieldname": "show_last_purchase",
+   "fieldtype": "Check",
+   "label": "Show Last Purchase",
+   "description": "Display last purchase price and date"
+  },
+  {
+   "default": "1",
+   "fieldname": "show_last_sale",
+   "fieldtype": "Check",
+   "label": "Show Last Sale",
+   "description": "Display last sale price and date to any customer"
+  },
+  {
+   "default": "1",
+   "fieldname": "show_last_sale_to_customer",
+   "fieldtype": "Check",
+   "label": "Show Last Sale to Customer",
+   "description": "Display last sale price and date to this specific customer"
+  },
+  {
+   "default": "1",
+   "depends_on": "eval:doc.enable_quotation_powerup || doc.enable_sales_order_powerup || doc.enable_sales_invoice_powerup || doc.enable_pos_invoice_powerup",
+   "fieldname": "sales_powerup_shown_by_default",
+   "fieldtype": "Check",
+   "label": "Shown by Default",
+   "description": "If checked, item insights and profit metrics show automatically on load. If unchecked, use Powerup \u2192 Show Item Insights to reveal them."
+  },
+  {
+   "fieldname": "column_break_margin_bands",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "10",
+   "description": "Margin badge bands. Under 0% is always Loss; from 0% up to this is Low.",
+   "fieldname": "sales_margin_low_below",
+   "fieldtype": "Percent",
+   "label": "Low Margin Below (%)"
+  },
+  {
+   "default": "20",
+   "description": "From Low up to this is Medium.",
+   "fieldname": "sales_margin_medium_below",
+   "fieldtype": "Percent",
+   "label": "Medium Margin Below (%)"
+  },
+  {
+   "default": "30",
+   "description": "From Medium up to this is Good; at or above it, Excellent.",
+   "fieldname": "sales_margin_good_below",
+   "fieldtype": "Percent",
+   "label": "Good Margin Below (%)"
+  },
+  {
+   "fieldname": "bulk_selection_section",
+   "fieldtype": "Section Break",
+   "label": "Bulk Selection"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_quotation_bulk_selection",
+   "fieldtype": "Check",
+   "label": "Enable for Quotation"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_sales_order_bulk_selection",
+   "fieldtype": "Check",
+   "label": "Enable for Sales Order"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_purchase_order_bulk_selection",
+   "fieldtype": "Check",
+   "label": "Enable for Purchase Order"
+  },
+  {
+   "fieldname": "column_break_bulk_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_sales_invoice_bulk_selection",
+   "fieldtype": "Check",
+   "label": "Enable for Sales Invoice"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_stock_reconciliation_bulk_selection",
+   "fieldtype": "Check",
+   "label": "Enable for Stock Reconciliation"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_stock_entry_bulk_selection",
+   "fieldtype": "Check",
+   "label": "Enable for Stock Entry"
+  },
+  {
+   "fieldname": "quick_pay_section",
+   "fieldtype": "Section Break",
+   "label": "Quick Pay"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_quick_pay",
+   "fieldtype": "Check",
+   "label": "Enable Quick Pay (Cash/Bank/Card)"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_quick_pay_mpesa",
+   "fieldtype": "Check",
+   "label": "Enable Quick Pay (Mpesa)"
+  },
+  {
+   "fieldname": "qp_column_break",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "depends_on": "eval:doc.enable_quick_pay || doc.enable_quick_pay_mpesa",
+   "fieldname": "qp_auto_create_invoice",
+   "fieldtype": "Check",
+   "label": "Auto-create Sales Invoice after payment"
+  },
+  {
+   "default": "1",
+   "depends_on": "eval:doc.qp_auto_create_invoice",
+   "fieldname": "qp_auto_submit_invoice",
+   "fieldtype": "Check",
+   "label": "Auto-submit invoice immediately"
+  },
+  {
+   "default": "1",
+   "depends_on": "eval:doc.qp_auto_create_invoice",
+   "description": "Deduct stock when the Sales Invoice is created/submitted. Disable if invoices should be billing-only (e.g. stock already moved via Delivery Note).",
+   "fieldname": "qp_update_stock",
+   "fieldtype": "Check",
+   "label": "Update Stock on invoice"
+  },
+  {
+   "fieldname": "lens_section",
+   "fieldtype": "Section Break",
+   "label": "Lens"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_lens",
+   "fieldtype": "Check",
+   "label": "Enable Lens"
+  },
+  {
+   "fieldname": "lens_description",
+   "fieldtype": "HTML",
+   "label": "Description",
+   "options": "<p class=\"text-muted\">Shows a per-item insights dialog on Quotation, Sales Order, Sales Invoice, Purchase Order, Purchase Receipt, and Purchase Invoice. Click the magnifying glass icon at the end of any item row to see sales/purchase history, rates billed to other parties, and price lists with live margin calculation.</p>"
+  },
+  {
+   "fieldname": "copy_as_image_section",
+   "fieldtype": "Section Break",
+   "label": "Copy",
+   "description": "Copy a Quotation, Sales Order, Sales Invoice or Purchase Order from its Powerup menu, as an image or as a message. Copy as Image is the checkbox below. Copy as Message is a Client Script per document type (PowerPack - Copy as Message): turn it on or off, or edit its text, under Client Script."
+  },
+  {
+   "default": "1",
+   "fieldname": "enable_copy_as_image",
+   "fieldtype": "Check",
+   "label": "Enable Copy as Image"
+  },
+  {
+   "fieldname": "rate_price_picker_section",
+   "fieldtype": "Section Break",
+   "label": "Rate Price Picker"
+  },
+  {
+   "default": "0",
+   "description": "On Quotation, Sales Order and Sales Invoice, focusing an item's Rate opens a dropdown of that item's price on each selling price list (in the document's currency), plus an editable Custom Price when the rate can be edited. Prices below the Minimum Selling Price floor are marked.",
+   "fieldname": "enable_rate_price_picker",
+   "fieldtype": "Check",
+   "label": "Enable Rate Price Picker"
+  },
+  {
+   "fieldname": "pricing_tab",
+   "fieldtype": "Tab Break",
+   "label": "Pricing"
+  },
+  {
+   "fieldname": "min_selling_price_section",
+   "fieldtype": "Section Break",
+   "label": "Minimum Selling Price"
+  },
+  {
+   "fieldname": "enable_min_selling_price",
+   "fieldtype": "Check",
+   "label": "Enable Minimum Selling Price Validation"
+  },
+  {
+   "fieldname": "min_selling_price_description",
+   "fieldtype": "HTML",
+   "label": "Description",
+   "options": "<div class=\"text-muted small\" style=\"margin-bottom:12px\">Sets the minimum net selling rate as a %age of the item's cost (Valuation Rate or Last Purchase Rate).<br>+ve % = margin above cost (e.g. 10 \u2192 cost \u00d7 1.10)<br>-ve % = allowed below cost (e.g. -10 \u2192 cost \u00d7 0.90)<br>0 or blank on a per-group row = no override for that group; the global default applies<br>0 or blank global default = groups without an override defer to thinkNXG ERP<br><b>Note:</b> Disable <i>Selling Settings \u2192 Validate Selling Price for Item</i> whenever this is enabled. thinkNXG ERP's check also enforces the item's <b>last purchase rate</b>, which blocks sales below a spiked purchase even when the margin above valuation is met.</div>"
+  },
+  {
+   "default": "Valuation Rate",
+   "fieldname": "min_selling_price_default_basis",
+   "fieldtype": "Select",
+   "label": "Global Default Basis",
+   "options": "Valuation Rate\nLast Purchase Rate"
+  },
+  {
+   "description": "Applied to item groups without an override. + = margin, \u2212 = allowed below cost, 0/blank = defer to thinkNXG ERP.",
+   "fieldname": "min_selling_price_default_percent",
+   "fieldtype": "Float",
+   "label": "Global Default Floor %"
+  },
+  {
+   "fieldname": "min_selling_price_override_role",
+   "fieldtype": "Link",
+   "label": "Role Allowed to Override",
+   "options": "Role"
+  },
+  {
+   "fieldname": "min_selling_price_column_break",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "description": "Skip minimum price validation for items where an thinkNXG ERP Pricing Rule has been applied.",
+   "fieldname": "min_selling_price_skip_if_pricing_rule",
+   "fieldtype": "Check",
+   "label": "Skip Validation When Pricing Rule Applied"
+  },
+  {
+   "default": "0",
+   "description": "Judge the whole sale instead of each row: total net must reach total cost plus the Global Default Floor %. Needs a non-zero Global Default Floor %; with 0 there is no sale-level check. Rows whose group has an override are still checked individually against that override, so a negative override caps how far that group may go below cost, and a positive one still forces margin on that group.",
+   "fieldname": "min_selling_price_whole_sale",
+   "fieldtype": "Check",
+   "label": "Enforce Floor on the Whole Sale Instead of Each Row"
+  },
+  {
+   "fieldname": "min_selling_price_whole_sale_diagram",
+   "fieldtype": "HTML",
+   "label": "Whole Sale Diagram",
+   "options": "<div class=\"text-muted small\"><details style=\"margin-top:0\"><summary style=\"cursor:pointer\">How the two modes work (diagram)</summary><a href=\"/assets/thinknxg_powerpack/images/min_selling_price_modes.svg?v=1\" target=\"_blank\" rel=\"noopener\" title=\"Open full size\"><img src=\"/assets/thinknxg_powerpack/images/min_selling_price_modes.svg?v=1\" alt=\"Per item vs whole sale enforcement\" style=\"max-width:100%;margin-top:8px;border:1px solid var(--border-color);border-radius:8px;background:#fafafa\"></a><div style=\"margin-top:4px\">Click the diagram to open it full size.</div></details></div>"
+  },
+  {
+   "default": "0",
+   "description": "When a breach cannot be overridden, the document saves as a draft and is routed to the Role Allowed to Override through a workflow that PowerPack manages. Submit stays blocked until approved.",
+   "fieldname": "msp_approval_quotation",
+   "fieldtype": "Check",
+   "label": "Price Approval on Quotation"
+  },
+  {
+   "default": "0",
+   "fieldname": "msp_approval_sales_order",
+   "fieldtype": "Check",
+   "label": "Price Approval on Sales Order"
+  },
+  {
+   "default": "0",
+   "fieldname": "msp_approval_sales_invoice",
+   "fieldtype": "Check",
+   "label": "Price Approval on Sales Invoice"
+  },
+  {
+   "default": "0",
+   "fieldname": "msp_approval_delivery_note",
+   "fieldtype": "Check",
+   "label": "Price Approval on Delivery Note"
+  },
+  {
+   "fieldname": "min_selling_price_rules_section",
+   "fieldtype": "Section Break",
+   "hide_border": 1
+  },
+  {
+   "fieldname": "min_selling_price_rules",
+   "fieldtype": "Table",
+   "label": "Per-Item-Group Overrides",
+   "options": "Minimum Selling Price Rule"
+  },
+  {
+   "fieldname": "items_tab",
+   "fieldtype": "Tab Break",
+   "label": "Items"
+  },
+  {
+   "fieldname": "item_search_powerup_section",
+   "fieldtype": "Section Break",
+   "label": "Item Powerups"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_item_search_powerup",
+   "fieldtype": "Check",
+   "label": "Enable Item Search Powerup"
+  },
+  {
+   "fieldname": "item_search_powerup_description",
+   "fieldtype": "HTML",
+   "label": "Description",
+   "options": "<p class=\"text-muted\">Replaces the default item search in all forms with an enhanced multi-word and wildcard search. Supports splitting search terms by spaces (all tokens must match) and <code>%</code> as a mid-word wildcard (e.g. <code>sam%tv</code>). When disabled, the standard thinkNXG ERP item search is used.</p>"
+  },
+  {
+   "fieldname": "item_list_powerup_section",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_item_list_powerup",
+   "fieldtype": "Check",
+   "label": "Enable Item List Powerup"
+  },
+  {
+   "fieldname": "item_list_powerup_description",
+   "fieldtype": "HTML",
+   "label": "Description",
+   "options": "<p class=\"text-muted\">Enable the Price List Bulk Editor client script for efficient bulk editing of item prices.</p>"
+  },
+  {
+   "fieldname": "withholding_tab",
+   "fieldtype": "Tab Break",
+   "label": "Withholding"
+  },
+  {
+   "fieldname": "kenya_withholding_section",
+   "fieldtype": "Section Break",
+   "label": "Kenya Withholding"
+  },
+  {
+   "fieldname": "enable_kenya_withholding",
+   "fieldtype": "Check",
+   "label": "Enable Kenya Withholding"
+  },
+  {
+   "fieldname": "withholding_vat_accounts",
+   "fieldtype": "Table MultiSelect",
+   "label": "VAT Withholding Accounts",
+   "options": "Withholding VAT Account",
+   "depends_on": "eval:doc.enable_kenya_withholding"
+  },
+  {
+   "fieldname": "withholding_rules",
+   "fieldtype": "Table",
+   "label": "Withholding Rules",
+   "options": "Withholding Rule",
+   "depends_on": "eval:doc.enable_kenya_withholding"
+  },
+  {
+   "fieldname": "withholding_exemptions",
+   "fieldtype": "Table",
+   "label": "VAT WHT Exemptions",
+   "options": "Withholding VAT Exemption",
+   "depends_on": "eval:doc.enable_kenya_withholding"
+  },
+  {
+   "fieldname": "system_tab",
+   "fieldtype": "Tab Break",
+   "label": "System"
+  },
+  {
+   "fieldname": "payment_reconciliation_section",
+   "fieldtype": "Section Break",
+   "label": "Powerups"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_payment_reconciliation_powerup",
+   "fieldtype": "Check",
+   "label": "Enable Payment Reconciliation Powerup"
+  },
+  {
+   "fieldname": "payment_reconciliation_description",
+   "fieldtype": "HTML",
+   "label": "Description",
+   "options": "<p class=\"text-muted\">Enables all Payment Reconciliation enhancements:<br><strong>Zero Allocate</strong> \u2014 create allocation rows with zero amounts for manual distribution without FIFO.<br><strong>Zero Reconcile</strong> \u2014 reconcile allocations, skipping zero-amount rows.<br><strong>2% Allocate</strong> (Supplier only) \u2014 set each allocation to 2% of the invoice net total (Kenya VAT withholding).<br><strong>Load Additional Doc Info</strong> \u2014 inline ETR numbers, supplier bill numbers, VAT withholding details, and credit note indicators.</p>"
+  },
+  {
+   "fieldname": "warnings_section",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_warnings",
+   "fieldtype": "Check",
+   "label": "Enable Warnings"
+  },
+  {
+   "fieldname": "warnings_description",
+   "fieldtype": "HTML",
+   "label": "Description",
+   "options": "<p class=\"text-muted\">When enabled, activates two proactive warnings:<br><strong>1. Empty Tax ID:</strong> Shows a warning when saving a Customer or Supplier that has no Tax ID set.<br><strong>2. Customer snapshot:</strong> An (i) icon next to Customer on Quotation, Sales Order, Delivery Note and Sales Invoice opens the customer's outstanding invoices, open payments, credit limit and contact, with Copy to Clipboard and Email Customer. The icon is red when invoices are overdue and amber when anything is pending; on selecting a customer with overdue invoices the dialog opens by itself.</p>"
+  },
+  {
+   "fieldname": "email_group_section",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "fieldname": "enable_email_group_powerup",
+   "fieldtype": "Check",
+   "label": "Enable Email Group Powerup"
+  },
+  {
+   "fieldname": "email_group_description",
+   "fieldtype": "HTML",
+   "label": "Description",
+   "options": "<p class=\"text-muted\">Adds two actions to Email Group:<br><strong>Import Subscribers by Item Purchased</strong> \u2014 add every customer who bought a given item or item group as a subscriber.<br><strong>Export Subscribers (CSV)</strong> \u2014 download the group as a CSV with company name, first name, last name and email, ready to import into Zoho Campaigns, Mailchimp or any bulk mail tool.</p>"
+  },
+  {
+   "fieldname": "validation_section",
+   "fieldtype": "Section Break",
+   "label": "Validation & Checks"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_duplicate_tax_id_check",
+   "fieldtype": "Check",
+   "label": "Enable Duplicate Tax ID Check"
+  },
+  {
+   "fieldname": "tax_id_validation_description",
+   "fieldtype": "HTML",
+   "label": "Description",
+   "options": "<p class=\"text-muted\">When enabled, the system will warn you before saving a Customer or Supplier if the Tax ID is already used by other records. This helps prevent duplicate entries.</p>"
+  },
+  {
+   "fieldname": "column_break_validation_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "prevent_etr_invoice_cancellation",
+   "fieldtype": "Check",
+   "label": "Prevent Cancellation if ETR Number Set"
+  },
+  {
+   "fieldname": "etr_validation_description",
+   "fieldtype": "HTML",
+   "label": "Description",
+   "options": "<p class=\"text-muted\">When enabled, Sales Invoices and POS Invoices with an ETR Invoice Number cannot be cancelled. This prevents accidental cancellation of tax-registered invoices.</p>"
+  },
+  {
+   "fieldname": "document_naming_section",
+   "fieldtype": "Section Break",
+   "label": "Document Naming"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_branch_naming_codes",
+   "fieldtype": "Check",
+   "label": "Enable Branch Naming Codes"
+  },
+  {
+   "fieldname": "column_break_document_naming",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "branch_naming_description",
+   "fieldtype": "HTML",
+   "label": "Description",
+   "options": "<p class=\"text-muted\">Short company, branch and return codes in document names, e.g. AC/HQ/SI/00001. Click <b>Naming guide</b> for the placeholders and setup steps.</p>"
+  },
+  {
+   "fieldname": "public_link_section",
+   "fieldtype": "Section Break",
+   "label": "Public Document Links"
+  },
+  {
+   "fieldname": "public_link_page",
+   "fieldtype": "Data",
+   "label": "Builder Page Route",
+   "description": "Optional: route of a thinkNXG Builder page that displays the document (e.g. /doc-view). When set, short links redirect here with ?t=token instead of the built-in viewer."
+  },
+  {
+   "fieldname": "column_break_public_link_0",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "public_link_description",
+   "fieldtype": "HTML",
+   "label": "Description",
+   "options": "<p class=\"text-muted\">Controls the branded document viewer shown when a customer opens a public link. Leave <strong>Builder Page Route</strong> empty to use the built-in viewer below. Set a banner image and footer to customise it.</p>"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "public_link_banner_section",
+   "fieldtype": "Section Break",
+   "label": "Banner &amp; Footer"
+  },
+  {
+   "fieldname": "public_link_top_banner",
+   "fieldtype": "Attach Image",
+   "label": "Top Banner Image",
+   "description": "Full-width banner shown above the document (e.g. a promotion or company image)"
+  },
+  {
+   "fieldname": "public_link_top_banner_link",
+   "fieldtype": "Data",
+   "label": "Banner Link URL",
+   "description": "Optional URL the banner image links to when clicked"
+  },
+  {
+   "default": "0",
+   "fieldname": "public_link_hide_header",
+   "fieldtype": "Check",
+   "label": "Hide Header",
+   "description": "Hide the company logo and name header on the public document viewer"
+  },
+  {
+   "fieldname": "column_break_public_link_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "public_link_header_content",
+   "fieldtype": "Small Text",
+   "label": "Header Content",
+   "description": "Optional text or HTML shown below the header bar when no Top Banner Image is set",
+   "ignore_xss_filter": 1
+  },
+  {
+   "fieldname": "public_link_footer_content",
+   "fieldtype": "Small Text",
+   "label": "Footer Content",
+   "description": "Optional text or HTML shown in the page footer (e.g. contact details, tagline, promotion)",
+   "ignore_xss_filter": 1
+  }
+ ],
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-10-29 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "thinkNXG PowerPack",
+ "name": "PowerPack Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Sales User"
+  },
+  {
+   "read": 1,
+   "role": "Stock User"
+  },
+  {
+   "read": 1,
+   "role": "Accounts User"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

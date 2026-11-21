@@ -1,0 +1,622 @@
+"""Whitelisted endpoints for Quick Pay. The two flows (cash/bank/card vs
+Mpesa) are gated by separate PowerPack Settings flags; both still live in
+this single module to keep the imports tidy.
+"""
+
+from __future__ import annotations
+
+import json as _json
+
+import frappe
+from frappe import _
+
+from thinknxg_powerpack.quick_pay import builders, validators
+from thinknxg_powerpack.utils import is_feature_enabled, mpesa_app_installed
+
+
+def _user_permitted_mops(user: str) -> list[str] | None:
+	perms = frappe.get_all(
+		"User Permission",
+		filters={"user": user, "allow": "Mode of Payment"},
+		fields=["for_value"],
+	)
+	if not perms:
+		return None  # no restriction
+	return [p["for_value"] for p in perms]
+
+
+@frappe.whitelist()
+def get_payment_modes(company: str) -> dict:
+	"""Categorize enabled Modes of Payment that have an account in `company`."""
+	validators.assert_quick_pay_enabled("cash")
+
+	permitted = _user_permitted_mops(frappe.session.user)
+
+	rows = frappe.get_all(
+		"Mode of Payment Account",
+		filters={"company": company},
+		fields=["parent", "default_account"],
+	)
+	candidates = sorted({r["parent"] for r in rows if r.get("default_account")})
+
+	result = {"cash_modes": [], "bank_modes": [], "card_modes": []}
+
+	for name in candidates:
+		if permitted is not None and name not in permitted:
+			continue
+		mop = frappe.get_cached_doc("Mode of Payment", name)
+		if not mop.enabled:
+			continue
+		mop_type = (mop.type or "").strip()
+		lname = name.lower()
+		if mop_type == "Phone":
+			continue
+		if mop_type == "Cash" or lname == "cash":
+			result["cash_modes"].append(name)
+		elif mop_type == "Bank" or "bank" in lname or "transfer" in lname:
+			result["bank_modes"].append(name)
+		elif mop_type == "Card" or any(k in lname for k in ("card", "credit", "debit")):
+			result["card_modes"].append(name)
+	return result
+
+
+@frappe.whitelist()
+def get_unallocated_payments(customer: str, company: str) -> list[dict]:
+	"""Return submitted Payment Entries for the customer that have unallocated amounts."""
+	validators.assert_quick_pay_enabled("cash")
+	if not customer or not company:
+		return []
+	return frappe.get_all(
+		"Payment Entry",
+		filters={
+			"party_type": "Customer",
+			"party": customer,
+			"docstatus": 1,
+			"payment_type": "Receive",
+			"unallocated_amount": [">", 0],
+			"company": company,
+		},
+		fields=["name", "posting_date", "mode_of_payment", "paid_amount", "unallocated_amount", "reference_no"],
+		order_by="posting_date asc",
+	)
+
+
+def _finalize_with_invoice(so_doc, *, submit_invoice: int, result: dict) -> None:
+	"""Create (and optionally submit) the Sales Invoice for a completed Quick Pay.
+
+	Called only once every Payment Entry for the request is inserted and submitted.
+	Mutates `result` in place with either `sales_invoice` or `invoice_error`.
+
+	WHY THE COMMIT COMES FIRST
+	--------------------------
+	`pe.insert()` names the Payment Entry through frappe's `getseries()`, which runs
+	`SELECT current FROM tabSeries WHERE name = 'ACC-PAY-<year>-' FOR UPDATE`. InnoDB
+	holds that row lock until the transaction commits, and frappe commits once, at the
+	end of the request — so the lock is held from the first PE insert all the way to
+	the response, not just for the duration of the SELECT.
+
+	Sales Invoice submission is the expensive part of that window: thinknxg_etims_compliance
+	registers a `Sales Invoice.before_submit` hook that makes a synchronous HTTPS call to
+	KRA eTIMS with a 30s timeout, then a second one for the stock movement. Holding a
+	site-wide Payment Entry naming-series lock across a third-party network round-trip
+	serialises every other Payment Entry writer on the site — other cashiers' Quick Pay,
+	POS, C2B reconciliation, Payment Reconciliation — behind this one request.
+
+	Committing here releases the series lock before any of that starts.
+
+	TRADE-OFF: this deliberately gives up all-or-nothing atomicity between the payments
+	and the invoice. That is the correct semantic — the money *was* received and the
+	Payment Entries are the record of it, so a KRA timeout must not silently discard a
+	recorded receipt (which is what the previous single-transaction behaviour did). The
+	caller surfaces `invoice_error` so the operator knows to create the invoice manually.
+	"""
+	frappe.db.commit()
+
+	try:
+		so_doc.reload()
+		si = builders.build_sales_invoice(so_doc, update_stock=is_feature_enabled("qp_update_stock"))
+		si.insert()
+		builders.sync_so_party_fields(si, so_doc)
+		if submit_invoice:
+			si.submit()
+		result["sales_invoice"] = {"name": si.name, "submitted": si.docstatus == 1}
+	except Exception:
+		# Roll back to the commit above: the invoice work is discarded, the Payment
+		# Entries survive. Log after the rollback so the Error Log row isn't discarded.
+		frappe.db.rollback()
+		frappe.log_error(
+			frappe.get_traceback(),
+			f"Quick Pay: invoice creation failed for {so_doc.name}",
+		)
+		result["sales_invoice"] = None
+		result["invoice_error"] = _(
+			"Payments were recorded successfully, but the invoice could not be created. "
+			"Create it from the Sales Order."
+		)
+
+
+def _apply_credit_to_so(pe_name: str, so_doc, amount: float, precision: int) -> dict | None:
+	"""Cancel+amend an unallocated Payment Entry to add an allocation to the Sales Order."""
+	pe = frappe.get_doc("Payment Entry", pe_name)
+	if pe.docstatus != 1:
+		frappe.throw(_("Payment Entry {0} is not submitted").format(pe_name))
+	if pe.party_type != "Customer" or pe.party != so_doc.customer:
+		frappe.throw(_("Payment Entry {0} does not belong to this customer").format(pe_name))
+
+	unalloc = float(pe.unallocated_amount or 0)
+	if unalloc <= 0:
+		return None
+
+	allocated = validators.cap_allocation(amount, unalloc, precision)
+	if allocated <= 0:
+		return None
+
+	pe.flags.ignore_permissions = True
+	pe.cancel()
+
+	total = validators.effective_total(so_doc)
+	amended = frappe.copy_doc(pe)
+	amended.docstatus = 0
+	amended.amended_from = pe.name
+	amended.append(
+		"references",
+		{
+			"reference_doctype": "Sales Order",
+			"reference_name": so_doc.name,
+			"allocated_amount": allocated,
+			"due_date": so_doc.delivery_date or frappe.utils.nowdate(),
+			"total_amount": total,
+			"outstanding_amount": total - float(so_doc.advance_paid),
+		},
+	)
+	amended.insert(ignore_permissions=True)
+	amended.submit()
+
+	return {"original_pe": pe_name, "amended_pe": amended.name, "amount": allocated}
+
+
+@frappe.whitelist()
+def process_quick_pay(
+	sales_order: str,
+	customer: str,
+	payments_json: str,
+	outstanding_amount: float,
+	create_invoice: int = 0,
+	submit_invoice: int = 0,
+	idempotency_token: str = "",
+	credits_json: str = "",
+) -> dict:
+	"""Process Cash/Bank/Card payments against a Sales Order, optionally
+	creating + submitting a Sales Invoice afterwards."""
+	validators.assert_quick_pay_enabled("cash")
+	create_invoice = int(create_invoice or 0)
+	submit_invoice = int(submit_invoice or 0)
+	validators.claim_idempotency_token(idempotency_token)
+
+	if not sales_order or not payments_json:
+		frappe.throw(_("Missing required parameters"))
+
+	payments = _json.loads(payments_json)
+	if not isinstance(payments, list):
+		frappe.throw(_("No payments provided"))
+	credits = _json.loads(credits_json) if credits_json else []
+	if not payments and not credits:
+		frappe.throw(_("No payments provided"))
+
+	so = frappe.get_doc("Sales Order", sales_order)
+	validators.assert_can_process_quick_pay(so, create_invoice, submit_invoice)
+	if so.docstatus != 1:
+		frappe.throw(_("Sales Order {0} is not submitted").format(sales_order))
+	if so.status in ("Closed", "Cancelled"):
+		frappe.throw(_("Cannot process payment for a {0} Sales Order").format(so.status))
+
+	precision = so.precision("grand_total")
+	actual_outstanding = validators.compute_outstanding(
+		validators.effective_total(so), so.advance_paid, precision
+	)
+	remaining = actual_outstanding
+
+	payment_entries: list[dict] = []
+	credits_applied: list[dict] = []
+	cash_tendered = 0.0  # raw amount the customer hands over (may exceed outstanding)
+	cash_allocated = 0.0  # portion of cash actually applied to the balance
+	total_paid = 0.0
+
+	# Apply unallocated payments (credits) first, before processing new payments.
+	if credits:
+		for c in credits:
+			c_pe = c.get("pe_name")
+			c_amt = float(c.get("amount") or 0)
+			if not c_pe or c_amt <= 0 or remaining <= 0:
+				continue
+			result = _apply_credit_to_so(c_pe, so, min(c_amt, remaining), precision)
+			if result:
+				credits_applied.append(result)
+				total_paid += result["amount"]
+				remaining = validators.normalize_amount(remaining - result["amount"], precision)
+		if credits_applied:
+			so.reload()
+
+	for p in payments:
+		p_type = p.get("type")
+		p_amount = float(p.get("amount") or 0)
+		p_mode = p.get("mode_of_payment") or p_type
+		p_ref = p.get("reference") or ""
+
+		if p_amount <= 0:
+			continue
+		if p_type not in {"Cash", "Bank Transfer", "Card"}:
+			continue
+		if p_type in {"Bank Transfer", "Card"} and not p_ref:
+			frappe.throw(_("Reference number required for {0}").format(p_type))
+
+		allocated = validators.cap_allocation(p_amount, remaining, precision)
+
+		if p_type == "Cash":
+			cash_tendered += p_amount
+			cash_allocated += allocated
+		if allocated <= 0:
+			continue
+
+		pe = builders.build_payment_entry(
+			so_doc=so,
+			amount=allocated,
+			mode_of_payment=p_mode,
+			reference_no=p_ref or None,
+			remarks=f"{p_type} payment for {so.name}",
+		)
+		pe.insert(ignore_permissions=True)
+		pe.submit()
+
+		payment_entries.append(
+			{
+				"name": pe.name,
+				"type": p_type,
+				"amount": allocated,
+			}
+		)
+		total_paid += allocated
+		remaining = validators.normalize_amount(remaining - allocated, precision)
+
+	if not payment_entries and not credits_applied:
+		frappe.throw(_("No valid payments could be created"))
+
+	change_amount = max(0.0, cash_tendered - cash_allocated)
+
+	result = {
+		"success": True,
+		"payment_entries": payment_entries,
+		"credits_applied": credits_applied,
+		"total_paid": total_paid,
+		"change_amount": change_amount,
+	}
+
+	if create_invoice and remaining <= 0:
+		_finalize_with_invoice(so, submit_invoice=submit_invoice, result=result)
+
+	return result
+
+
+def _phone_mop_for_company(company: str) -> str | None:
+	rows = frappe.get_all(
+		"Mode of Payment",
+		filters={"type": "Phone", "enabled": 1},
+		fields=["name"],
+	)
+	for row in rows:
+		if frappe.db.exists("Mode of Payment Account", {"parent": row.name, "company": company}):
+			return row.name
+	return None
+
+
+def _mpesa_setups(company: str) -> list[dict]:
+	"""The company's M-Pesa setups (one per paybill/till), each with the gateway account
+	the M-Pesa app made for it. That app names the gateway "Mpesa-<payment_gateway_name>";
+	looking it up by the settings name never matched, so Quick Pay fell back to the first
+	M-Pesa gateway on the site, whichever paybill that was."""
+	# Every Quick Pay M-Pesa path resolves a setup before it touches the register, so a
+	# site without the app stops here: the availability check reports unavailable, the
+	# pending list comes back empty, and the reconcile call throws "No Mpesa Settings"
+	# rather than querying a missing table.
+	if not mpesa_app_installed():
+		return []
+
+	setups = []
+	for row in frappe.get_all(
+		"Mpesa Settings",
+		filters={"company": company},
+		fields=["name", "payment_gateway_name", "business_shortcode", "sandbox"],
+		order_by="name",
+	):
+		row = frappe._dict(row)
+		if not row.business_shortcode:
+			continue
+		gateway = f"Mpesa-{row.payment_gateway_name or row.name}"
+		account = frappe.db.get_value(
+			"Payment Gateway Account",
+			{"payment_gateway": gateway},
+			["name", "payment_account", "is_default"],
+			as_dict=True,
+		)
+		shortcode = str(row.business_shortcode)
+		setups.append(
+			{
+				"name": row.name,
+				"shortcode": shortcode,
+				"label": f"{shortcode} ({row.name})" if row.name != shortcode else shortcode,
+				"sandbox": row.sandbox,
+				"gateway": gateway,
+				"gateway_account": account.name if account else None,
+				"payment_account": account.payment_account if account else None,
+				"is_default": account.is_default if account else 0,
+			}
+		)
+	return setups
+
+
+def _mpesa_setup(company: str, mpesa_settings: str | None = None) -> dict | None:
+	"""The setup to use: the one chosen, or the only one. Several and none chosen is
+	refused rather than guessed - a guess sends the customer's money to another till."""
+	setups = _mpesa_setups(company)
+	if mpesa_settings:
+		for setup in setups:
+			if setup["name"] == mpesa_settings:
+				return setup
+		frappe.throw(_("{0} is not an M-Pesa paybill or till of {1}").format(mpesa_settings, company))
+	if len(setups) > 1:
+		frappe.throw(_("{0} has several M-Pesa paybills/tills. Choose which one.").format(company))
+	return setups[0] if setups else None
+
+
+def _mpesa_shortcode_for_company(company: str, mpesa_settings: str | None = None) -> str | None:
+	setup = _mpesa_setup(company, mpesa_settings)
+	return setup["shortcode"] if setup else None
+
+
+def _setup_mop(setup: dict, company: str) -> str | None:
+	"""The setup's own Mode of Payment ("Mpesa-<name>", made with its gateway), else the
+	company's Phone mode."""
+	if frappe.db.exists("Mode of Payment Account", {"parent": setup["gateway"], "company": company}):
+		return setup["gateway"]
+	return _phone_mop_for_company(company)
+
+
+@frappe.whitelist()
+def check_mpesa_available(company: str) -> dict:
+	validators.assert_quick_pay_enabled("mpesa")
+	setups = _mpesa_setups(company)
+	return {
+		"available": bool(setups and _phone_mop_for_company(company)),
+		"setups": [{k: s[k] for k in ("name", "label", "sandbox", "is_default")} for s in setups],
+	}
+
+
+@frappe.whitelist()
+def list_pending_mpesa_payments(
+	company: str, search: str = "", with_count: int = 1, mpesa_settings: str | None = None
+) -> dict:
+	validators.assert_quick_pay_enabled("mpesa")
+	shortcode = _mpesa_shortcode_for_company(company, mpesa_settings)
+	if not shortcode:
+		return {"count": 0, "payments": []}
+
+	base_filters = {"docstatus": 0, "businessshortcode": shortcode}
+	# The count is an aggregate over the whole pending register and only changes when
+	# rows are added/submitted — not per keystroke. Compute it on the initial dialog
+	# load (with_count=1) so the client can cache it, and skip it on every subsequent
+	# search call (with_count=0) to avoid re-scanning the register each time.
+	total_count = (
+		frappe.db.count("Mpesa C2B Payment Register", base_filters) if int(with_count) else 0
+	)
+
+	payments: list[dict] = []
+	if len(search) >= 3:
+		s = f"%{search}%"
+		payments = frappe.get_all(
+			"Mpesa C2B Payment Register",
+			filters=base_filters,
+			or_filters=[
+				["full_name", "like", s],
+				["transid", "like", s],
+				["billrefnumber", "like", s],
+				["msisdn", "like", s],
+			],
+			fields=[
+				"name",
+				"full_name",
+				"transamount",
+				"transid",
+				"msisdn",
+				"posting_date",
+				"billrefnumber",
+				"creation",
+			],
+			order_by="creation desc",
+			limit_page_length=100,
+		)
+	return {"count": total_count, "payments": payments}
+
+
+@frappe.whitelist()
+def process_mpesa_quick_pay(
+	sales_order: str,
+	customer: str,
+	mpesa_payments: str,
+	outstanding_amount: float,
+	create_invoice: int = 0,
+	submit_invoice: int = 0,
+	idempotency_token: str = "",
+	mpesa_settings: str | None = None,
+) -> dict:
+	validators.assert_quick_pay_enabled("mpesa")
+	create_invoice = int(create_invoice or 0)
+	submit_invoice = int(submit_invoice or 0)
+	validators.claim_idempotency_token(idempotency_token)
+
+	mpesa_names = [n.strip() for n in (mpesa_payments or "").split(",") if n.strip()]
+	if not mpesa_names:
+		frappe.throw(_("No Mpesa payments selected"))
+
+	so = frappe.get_doc("Sales Order", sales_order)
+	validators.assert_can_process_quick_pay(so, create_invoice, submit_invoice)
+	if so.docstatus != 1:
+		frappe.throw(_("Sales Order {0} is not submitted").format(sales_order))
+	if so.status in ("Closed", "Cancelled"):
+		frappe.throw(_("Cannot process payment for a {0} Sales Order").format(so.status))
+
+	setup = _mpesa_setup(so.company, mpesa_settings)
+	if not setup:
+		frappe.throw(_("No Mpesa Settings for {0}").format(so.company))
+	shortcode = setup["shortcode"]
+	phone_mop = _setup_mop(setup, so.company)
+	if not phone_mop:
+		frappe.throw(_("No Phone-type Mode of Payment configured for {0}").format(so.company))
+
+	precision = so.precision("grand_total")
+	remaining = validators.compute_outstanding(validators.effective_total(so), so.advance_paid, precision)
+
+	payment_entries: list[dict] = []
+	mpesa_results: list[dict] = []
+
+	# company / customer / mode are constant across the loop — resolve the PE
+	# accounts + currencies once instead of on every selected payment.
+	payment_accounts = builders.resolve_payment_accounts(so.company, so.customer, phone_mop)
+
+	for mpesa_name in mpesa_names:
+		if remaining <= 0:
+			break
+		mpesa = frappe.get_doc("Mpesa C2B Payment Register", mpesa_name)
+		if mpesa.docstatus != 0:
+			continue
+		if str(mpesa.businessshortcode or "") != shortcode:
+			continue
+
+		mpesa_amt = float(mpesa.transamount or 0)
+		if mpesa_amt <= 0:
+			continue
+		allocated = validators.cap_allocation(mpesa_amt, remaining, precision)
+
+		# Build & submit the PE FIRST.
+		pe = builders.build_payment_entry(
+			so_doc=so,
+			amount=allocated,
+			mode_of_payment=phone_mop,
+			reference_no=mpesa_name,
+			remarks=f"Mpesa payment: {mpesa_name}",
+			full_received_amount=mpesa_amt,
+			accounts=payment_accounts,
+		)
+		pe.insert(ignore_permissions=True)
+		pe.submit()
+
+		# Now mark the Mpesa row as processed and link the PE. submit() persists
+		# these field changes and transitions docstatus in a single write, so no
+		# separate save() is needed.
+		mpesa.customer = so.customer
+		mpesa.company = so.company
+		mpesa.mode_of_payment = phone_mop
+		mpesa.submit_payment = 0
+		mpesa.payment_entry = pe.name
+		mpesa.flags.ignore_permissions = True
+		mpesa.submit()
+
+		payment_entries.append(
+			{
+				"name": pe.name,
+				"type": "Mpesa",
+				"amount": allocated,
+				"full_amount": mpesa_amt,
+			}
+		)
+		mpesa_results.append({"name": mpesa.name, "amount": mpesa_amt})
+		remaining = validators.normalize_amount(remaining - allocated, precision)
+
+	if not payment_entries:
+		frappe.throw(_("No valid Mpesa payments processed"))
+
+	result = {
+		"success": True,
+		"payment_entries": payment_entries,
+		"mpesa_payments": mpesa_results,
+		"total_amount": sum(p["amount"] for p in payment_entries),
+	}
+
+	if create_invoice and remaining <= 0:
+		_finalize_with_invoice(so, submit_invoice=submit_invoice, result=result)
+
+	return result
+
+
+@frappe.whitelist()
+def get_customer_phone(customer: str) -> str:
+	validators.assert_quick_pay_enabled("mpesa")
+	if not customer:
+		return ""
+	contact = frappe.db.get_value(
+		"Dynamic Link",
+		{"link_doctype": "Customer", "link_name": customer, "parenttype": "Contact"},
+		"parent",
+	)
+	if contact:
+		for field in ("mobile_no", "phone"):
+			phone = frappe.db.get_value("Contact", contact, field)
+			if phone:
+				return phone
+	return frappe.db.get_value("Customer", customer, "mobile_no") or ""
+
+
+@frappe.whitelist()
+def create_mpesa_payment_request(
+	sales_order: str,
+	customer: str,
+	phone_number: str,
+	amount: float,
+	mpesa_settings: str | None = None,
+) -> dict:
+	validators.assert_quick_pay_enabled("mpesa")
+	if not (sales_order and phone_number and float(amount) > 0):
+		frappe.throw(_("Missing required parameters"))
+
+	so = frappe.get_doc("Sales Order", sales_order)
+	if so.docstatus != 1:
+		frappe.throw(_("Sales Order {0} is not submitted").format(sales_order))
+	if so.status in ("Closed", "Cancelled"):
+		frappe.throw(_("Cannot process payment for a {0} Sales Order").format(so.status))
+
+	precision = so.precision("grand_total")
+	outstanding = validators.compute_outstanding(validators.effective_total(so), so.advance_paid, precision)
+	safe_amount = validators.cap_allocation(float(amount), outstanding, precision)
+	if safe_amount <= 0:
+		frappe.throw(_("No outstanding amount on this Sales Order"))
+
+	setup = _mpesa_setup(so.company, mpesa_settings)
+	if not setup:
+		frappe.throw(_("No Mpesa Settings for {0}").format(so.company))
+	if not setup["gateway_account"]:
+		frappe.throw(_("No Payment Gateway Account for M-Pesa {0}").format(setup["label"]))
+
+	pr = frappe.new_doc("Payment Request")
+	pr.payment_request_type = "Inward"
+	pr.transaction_date = frappe.utils.nowdate()
+	pr.phone_number = phone_number
+	pr.company = so.company
+	pr.party_type = "Customer"
+	pr.party = so.customer
+	pr.reference_doctype = "Sales Order"
+	pr.reference_name = sales_order
+	pr.grand_total = safe_amount
+	pr.currency = so.currency
+	pr.outstanding_amount = safe_amount
+	pr.payment_gateway_account = setup["gateway_account"]
+	pr.payment_gateway = setup["gateway"]
+	pr.payment_account = setup["payment_account"]
+	pr.payment_channel = "Phone"
+	pr.mode_of_payment = _setup_mop(setup, so.company)
+	pr.subject = f"Payment for {sales_order}"
+	pr.message = f"Payment for {sales_order}"
+	pr.mute_email = 1
+	pr.make_sales_invoice = 0
+	pr.insert(ignore_permissions=True)
+	pr.submit()
+
+	return {"success": True, "payment_request": pr.name}

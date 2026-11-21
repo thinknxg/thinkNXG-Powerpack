@@ -1,0 +1,1111 @@
+// thinknxg_powerpack/thinknxg_powerpack/page/powerpack_permissions/powerpack_permissions.js
+// Copyright (c) 2026, thinkNXG and contributors
+// For license information, please see license.txt
+
+/**
+ * PowerPack Permission Manager.
+ *
+ * Every role permission rule on the site in one virtualized table. Nothing is written
+ * until Commit, which sends the whole change set to
+ * thinknxg_powerpack.permission_manager.commit_changes in one round trip.
+ *
+ * This file is loaded by frappe's page loader, not by the app bundle, so it is a
+ * classic script: top-level names here ARE global. Keep everything on the class.
+ */
+
+frappe.pages["powerpack-permissions"].on_page_load = (wrapper) => {
+	const page = frappe.ui.make_app_page({
+		parent: wrapper,
+		title: __("PowerPack Permission Manager"),
+		single_column: true,
+	});
+	frappe.breadcrumbs.add("Setup");
+	wrapper.permission_manager = new frappe.PowerPackPermissionManager(wrapper, page);
+};
+
+// frappe's router has no cancellable pre-navigation hook: `frappe.router` only ever
+// fires "change" (router.js:152), and it fires it AFTER this.render() has already swapped
+// the page; its emitter (router.js:698 -> event_emitter.js) hands handlers the data only
+// and throws their return value away, so nothing a handler does can stop a route. So the
+// in-app guard cannot block navigation — it preserves the change set instead and says so
+// on the way back. See on_show() / show_stale_notice().
+frappe.pages["powerpack-permissions"].on_page_show = (wrapper) =>
+	wrapper.permission_manager && wrapper.permission_manager.on_show();
+
+frappe.PowerPackPermissionManager = class PowerPackPermissionManager {
+	constructor(wrapper, page) {
+		this.wrapper = wrapper;
+		this.page = page;
+		this.$body = $('<div class="pp-perm"></div>').appendTo(this.page.main);
+
+		// key -> {flag: new value}; only flags that differ from the loaded value
+		this.dirty = {};
+		// Rules staged for creation and deletion. Same lifecycle as the dirty store:
+		// nothing reaches the server until Commit, and Discard drops them.
+		this.pending_adds = {};
+		this.pending_removes = {};
+		this.filters = {};
+
+		// Anchor for shift-click range select: the rowIndex of the last checkbox clicked.
+		this._last_checked_index = null;
+		// The page container fires "show" immediately after "load" (container.js:80), so the
+		// very first on_show() would re-run the load this constructor is about to start.
+		this._first_show_pending = true;
+
+		this.bind_unload_guard();
+		this.load();
+	}
+
+	// Editable flags, in display order. submit/cancel/amend are blanked for
+	// non-submittable doctypes in render_flag.
+	static get FLAGS() {
+		return [
+			"select", "read", "write", "create", "delete",
+			"submit", "cancel", "amend",
+			"print", "email", "report", "import", "export", "share", "mask",
+		];
+	}
+	static get SUBMIT_FLAGS() { return ["submit", "cancel", "amend"]; }
+
+	/**
+	 * frappe rejects a rule with none of these set (check_atleast_one_set,
+	 * frappe/core/doctype/doctype/doctype.py:1859) — and it does so inside
+	 * validate_permissions(), which runs after every row is written, so the whole commit
+	 * rolls back on it. Kept in step with permission_manager.BASIC_RIGHTS; a server test
+	 * asserts that list still matches frappe's own predicate.
+	 */
+	static get BASIC_RIGHTS() { return ["select", "read", "write", "create", "submit", "cancel"]; }
+
+	// thinkNXG's own Role Permissions Manager refuses these three
+	// (not_allowed_in_permission_manager, frappe/core/page/permission_manager/permission_manager.py),
+	// and child tables have no meaningful role permissions of their own.
+	static get NOT_ADDABLE_DOCTYPES() { return ["DocType", "Patch Log", "Module Def"]; }
+
+	/**
+	 * Roles the dialog will not offer. Administrator is never a sensible target, disabled
+	 * roles are filtered by the query itself, and frappe hides the automatic roles from
+	 * anyone but Administrator — match that rather than inventing our own rule.
+	 */
+	excluded_roles() {
+		const out = ["Administrator"];
+		if (frappe.session.user !== "Administrator") out.push("All", "Guest", "Desk User");
+		return out;
+	}
+
+	// Lucide icon per flag, for the column headers. All fifteen are one icon set so the
+	// stroke weight matches; every id was checked to resolve against the sprite the desk
+	// loads (a <use> pointing at a missing symbol renders an invisible blank, not an error).
+	// import/export follow thinkNXG's own metaphor: you UPLOAD a file to import, and
+	// DOWNLOAD the file you export.
+	static get FLAG_ICONS() {
+		return {
+			select: "mouse-pointer", read: "eye", write: "pencil", create: "plus",
+			delete: "trash", submit: "check", cancel: "ban", amend: "rotate-ccw",
+			print: "printer", email: "mail", report: "file-text", import: "upload",
+			export: "download", share: "share-2", mask: "eye-off",
+		};
+	}
+
+	/**
+	 * Index of our first real column in the datatable's own column list.
+	 *
+	 * The datatable prepends synthetic columns: `_checkbox`, and `_rowIndex` when the
+	 * serial column is enabled. Its `getFirstColumnIndex()` derives that offset as
+	 * `getColumnIndexById('_rowIndex') + 1` (dist :3976-3978) — with the serial column
+	 * off that lookup returns -1 and the helper answers 0, which silently stops
+	 * excluding the `_checkbox` column. Derive the offset from our own first column so
+	 * it stays correct whatever synthetic columns are in play.
+	 */
+	first_data_col_index() {
+		return this.datatable.datamanager.getColumnIndexById(this.columns[0].id);
+	}
+
+	key_of(row) {
+		// JSON, not concatenation: "Foo Bar"+"Baz" would collide with "Foo"+"Bar Baz", and
+		// an invisible control-character delimiter gets stripped by copy paths and HTML
+		// parsing. JSON is unambiguous and round-trips through a data- attribute.
+		return JSON.stringify([row.doctype, row.role, row.permlevel, row.if_owner]);
+	}
+
+	load() {
+		this._loading = true;
+		this._last_checked_index = null;
+		this.hide_stale_notice();
+		this.$body.html(`<div class="pp-perm-empty">${__("Loading permission rules…")}</div>`);
+		frappe.call({
+			method: "thinknxg_powerpack.permission_manager.get_permission_rules",
+			callback: (r) => {
+				this.rows = r.message.rows;
+				this.can_edit = r.message.can_edit;
+				this.by_key = {};
+				this.rows.forEach((row) => {
+					row.key = this.key_of(row);
+					this.by_key[row.key] = row;
+				});
+				this.dirty = {};
+				this.original = {};
+				this.pending_adds = {};
+				this.pending_removes = {};
+				this._loading = false;
+				this.render();
+			},
+			error: () => {
+				// The server already showed its permission message; leave a stub, not a spinner.
+				this._loading = false;
+				this.$body.html(`<div class="pp-perm-empty">${__("You do not have access to permission rules.")}</div>`);
+			},
+		});
+	}
+
+	render() {
+		this.$body.empty();
+		this.make_filters();
+		this.$table = $('<div class="pp-perm-table"></div>').appendTo(this.$body);
+		this.make_table();
+		this.make_footer();
+		this.apply_filters();
+		this.update_footer();
+	}
+
+	// ── filters ────────────────────────────────────────────────────────────────
+
+	make_filters() {
+		this.$filters = $('<div class="pp-perm-filters"></div>').appendTo(this.$body);
+		const add = (df) => {
+			const field = frappe.ui.form.make_control({ df, parent: this.$filters, render_input: true });
+			field.$wrapper.addClass("pp-filter");
+			// render() rebuilds these controls from scratch on every load — including the
+			// reload after a commit — but this.filters survives. Re-seed the input, or the
+			// model and the UI diverge: the grid stays filtered while every box looks empty,
+			// and clearing a box cannot undo a filter you can no longer see.
+			//
+			// set_input(), not set_value(): set_value() routes through
+			// validate_and_set_in_model, which fires df.change — and it does so via
+			// frappe.run_serially, i.e. in a microtask AFTER this call stack unwinds, so
+			// assigning df.change below would not outrun it. set_input() writes the value
+			// and the DOM and never reaches df.change (base_control.js:241), so seeding
+			// cannot re-trigger apply_filters() at all.
+			if (this.filters[df.fieldname]) field.set_input(this.filters[df.fieldname]);
+			field.df.change = () => {
+				this.filters[df.fieldname] = field.get_value();
+				this.apply_filters();
+			};
+			return field;
+		};
+		add({ fieldtype: "Link", fieldname: "module", label: __("Module"), options: "Module Def" });
+		add({ fieldtype: "Link", fieldname: "doctype", label: __("Document Type"), options: "DocType" });
+		add({ fieldtype: "Link", fieldname: "role", label: __("Role"), options: "Role" });
+		add({ fieldtype: "Data", fieldname: "search", label: __("Search") });
+		add({ fieldtype: "Check", fieldname: "modified_only", label: __("Modified only") });
+	}
+
+	apply_filters() {
+		const f = this.filters;
+		const q = (f.search || "").toLowerCase();
+		this.view = this.rows.filter((row) => {
+			if (f.module && row.module !== f.module) return false;
+			if (f.doctype && row.doctype !== f.doctype) return false;
+			if (f.role && row.role !== f.role) return false;
+			if (
+				f.modified_only &&
+				!this.dirty[row.key] &&
+				!this.pending_adds[row.key] &&
+				!this.pending_removes[row.key]
+			)
+				return false;
+			if (q && !(`${row.doctype} ${row.role} ${row.module}`.toLowerCase().includes(q))) return false;
+			return true;
+		});
+		// The datatable keeps its checkbox map across refresh(), so a selection made under
+		// one filter would silently apply to whatever rows occupy those indexes under the
+		// next. A filter change always drops the selection.
+		if (this.datatable.rowmanager) this.datatable.rowmanager.checkAll(false);
+		// The shift anchor is a rowIndex into the old view; it means nothing in the new one.
+		this._last_checked_index = null;
+		this.datatable.refresh(this.view, this.columns);
+		this.page.set_indicator(__("{0} rules", [this.view.length]), "blue");
+		this.update_footer();
+	}
+
+	// ── table ──────────────────────────────────────────────────────────────────
+
+	make_table() {
+		const text = (id, name, width) => ({
+			id, name, width, editable: false, dropdown: false, resizable: true,
+			format: (value) => frappe.utils.escape_html(String(value ?? "")),
+		});
+		// Icon headers, not text. At 44px the 3-character labels truncated to "S…" for BOTH
+		// Select and Submit and "C…" for BOTH Create and Cancel, so you could not tell which
+		// column you were ticking. The icon carries the meaning; title= carries the full word
+		// on hover and aria-label carries it for screen readers.
+		// frappe-datatable injects a header's content unescaped (getCellContent returns
+		// cell.content as-is when isHeader), so this markup renders as markup. Everything
+		// interpolated here is an internal constant or a translation of one, never user input,
+		// and the label is escaped anyway.
+		const flag = (id) => {
+			const label = frappe.utils.escape_html(__(frappe.unscrub(id)));
+			const icon = frappe.utils.icon(this.constructor.FLAG_ICONS[id], "sm");
+			return {
+				id,
+				name: `<span class="pp-flag-head" title="${label}" aria-label="${label}">${icon}</span>`,
+				width: 32, align: "center",
+				editable: false, dropdown: false, sortable: true,
+				format: (value, row, column, data) => this.render_flag(data, id),
+			};
+		};
+
+		this.columns = [
+			text("module", __("Module"), 130),
+			{
+				...text("doctype", __("Document Type"), 200),
+				// Editing a standard (not-yet-custom) row detaches its doctype from app
+				// permission updates on commit; mark it so that detachment risk is
+				// visible in the grid.
+				format: (value, row, column, data) => {
+					const name = frappe.utils.escape_html(String(value ?? ""));
+					if (data.is_new) {
+						return `<span class="pp-new" title="${__("New rule — not saved until you commit")}">${name}</span>`;
+					}
+					if (data.is_removed) {
+						return `<span class="pp-removed" title="${__("Staged for deletion on commit — select it and choose Actions › Restore Selected to undo")}">${name}</span>`;
+					}
+					return data.is_custom
+						? name
+						: `<span class="pp-standard" title="${__("Standard rule — editing it detaches this doctype from app permission updates")}">${name}</span>`;
+				},
+			},
+			text("role", __("Role"), 150),
+			{ id: "permlevel", name: __("Lvl"), width: 44, align: "center", editable: false, dropdown: false },
+			{
+				// Same icon treatment as the flags: "Own" truncated to "O…" at 44px, and the
+				// full name ("Only If Creator") is what an admin actually needs to see.
+				id: "if_owner",
+				name: ((label) =>
+					`<span class="pp-flag-head" title="${label}" aria-label="${label}">${frappe.utils.icon("user", "sm")}</span>`
+				)(frappe.utils.escape_html(__("Only If Creator"))),
+				width: 36, align: "center", editable: false, dropdown: false,
+				format: (v) => (v ? "✓" : ""),
+			},
+			...this.constructor.FLAGS.map(flag),
+		];
+
+		this.datatable = new frappe.DataTable(this.$table[0], {
+			columns: this.columns,
+			data: [],
+			checkboxColumn: this.can_edit,
+			// No serial-number column: it costs 59px, and because frappe-datatable keeps a
+			// row's ORIGINAL index there, the numbers jump (3, 7, 8, 10 …) as soon as you
+			// sort — misleading rather than useful. The page header already shows the count.
+			serialNoColumn: false,
+			// The datatable floats a persistent "N rows selected" toast over the grid for as
+			// long as anything is checked (RowManager.showCheckStatus, dist :4162-4174 — it
+			// only clears at zero, never on a timer). The footer already reports the count,
+			// so the toast is redundant and sits on top of the rows you are trying to tick.
+			checkedRowStatus: false,
+			inlineFilters: false,
+			cellHeight: 28,
+			noDataMessage: __("No permission rules match"),
+			events: { onCheckRow: () => this.update_footer() },
+		});
+
+		// Flag checkboxes are plain HTML inside datatable cells; delegate their clicks.
+		this.$table.on("change", "input.pp-flag", (e) => {
+			const $cb = $(e.currentTarget);
+			// Raw attribute, not $cb.data("key"): jQuery auto-parses a JSON-looking
+			// data-key string into an array, and by_key[array] stringifies it back via
+			// Array.toString() (comma-joined, unquoted) which no longer matches the
+			// JSON.stringify key used to build by_key.
+			const key = e.currentTarget.getAttribute("data-key");
+			const checked = $cb.prop("checked") ? 1 : 0;
+			const row = this.by_key[key];
+			// `row &&` because set_flag() also returns false for an unknown row, and the
+			// basic-rights message would be a wrong explanation for that.
+			if (this.set_flag(row, $cb.data("flag"), checked) === false && row && !checked) {
+				// Nothing was written, so the box must not stay cleared.
+				$cb.prop("checked", true);
+				frappe.show_alert({
+					message: __(
+						"A rule must keep at least one of {0}. Set another one first, or remove the rule.",
+						[this.constructor.BASIC_RIGHTS.map((f) => __(frappe.unscrub(f))).join(", ")]
+					),
+					indicator: "orange",
+				});
+			}
+		});
+
+		this.bind_shift_select();
+		this.bind_header_sort();
+	}
+
+	// ── header sort ────────────────────────────────────────────────────────────
+
+	/**
+	 * frappe-datatable's own sort UI is the header dropdown, but its items always
+	 * include "Remove column" (and Freeze/Unfreeze): DataTable.buildOptions
+	 * concatenates whatever `headerDropdown` we pass AFTER its own DEFAULT_OPTIONS
+	 * list (dist frappe-datatable.cjs.js:5933-5936 — `this.options.headerDropdown =
+	 * [...this.DEFAULT_OPTIONS.headerDropdown, ...options.headerDropdown]`), so the
+	 * defaults can never be excluded that way. refresh_row() maps cell values by
+	 * `this.columns` index, so letting a column be removed would desync every
+	 * later cell — passing `dropdown: true` (design (a)) is therefore not safe.
+	 *
+	 * Every column keeps `dropdown: false` (no header dropdown is rendered at all —
+	 * getCellContent, dist :3427-3429 — so `.dt-dropdown__toggle` never exists) and
+	 * sorting is driven directly: a delegated click on the header cell calls
+	 * `datatable.sortColumn(colIndex, order)` (ColumnManager.sortColumn, dist
+	 * :3767-3779), cycling none -> asc -> desc -> none. sortColumn() already calls
+	 * refreshHeader() (dist :3771) which re-renders the header and, since every one
+	 * of our columns has `sortable !== false`, repaints the built-in sort-indicator
+	 * span from `cell.sortOrder` (getCellContent, dist :3418-3423) — no extra CSS
+	 * needed for the arrow.
+	 */
+	bind_header_sort() {
+		this.$table.on("click", ".dt-cell--header", (e) => {
+			// The resize handle and, for can_edit, the select-all checkbox both live
+			// inside the header cell and bubble a click here; leave them alone.
+			if (e.target.closest('.dt-cell__resize-handle, [type="checkbox"]')) return;
+			const cell = e.currentTarget;
+			const col_index = parseInt(cell.dataset.colIndex, 10);
+			if (isNaN(col_index)) return;
+			// Column 0 (the checkbox column, when can_edit) and the serial-number
+			// column frappe-datatable always prepends are not part of `this.columns`
+			// and are not in the sortable set the brief asks for.
+			if (col_index < this.first_data_col_index()) return;
+			const column = this.datatable.columnmanager.getColumn(col_index);
+			const next = { none: "asc", asc: "desc", desc: "none" }[column.sortOrder] || "asc";
+			this.datatable.sortColumn(col_index, next);
+		});
+	}
+
+	// ── shift-click range select ───────────────────────────────────────────────
+
+	/**
+	 * frappe-datatable's own checkbox handler (RowManager.bindCheckbox, dist
+	 * frappe-datatable.cjs.js:4064) delegates `click` on `.dt-cell--col-0 [type="checkbox"]`
+	 * from the SAME element we hand the constructor (DataTable sets `this.wrapper = wrapper`,
+	 * :5891), and it has no shift handling at all. Both listeners are therefore native
+	 * listeners on one element and run in registration order — the datatable's first, since
+	 * it was bound in its constructor above. So by the time we run, the clicked row has
+	 * already been toggled and the checkbox carries its NEW state; we only extend that state
+	 * over the range and never re-toggle the clicked row itself.
+	 */
+	bind_shift_select() {
+		// Shift-clicking inside the grid would otherwise drag a text selection across every
+		// row in between. mousedown's default is what starts that selection; suppressing it
+		// does not stop the checkbox from toggling (activation happens on click).
+		this.$table.on("mousedown", '.dt-cell--col-0 [type="checkbox"]', (e) => {
+			if (e.shiftKey) e.preventDefault();
+		});
+
+		this.$table.on("click", '.dt-cell--col-0 [type="checkbox"]', (e) => {
+			const cell = e.currentTarget.closest(".dt-cell");
+			// The header cell is the select-all box; leave it entirely to the datatable.
+			if (!cell || cell.dataset.isHeader) return;
+			const row_index = parseInt(cell.dataset.rowIndex, 10);
+			if (isNaN(row_index)) return;
+
+			// The clicked box's new state is what the range follows: shift-clicking an
+			// unchecked box checks the range, shift-clicking a checked one clears it.
+			const state = !!e.currentTarget.checked;
+			if (e.shiftKey && this._last_checked_index !== null && this._last_checked_index !== row_index) {
+				this.check_range(this._last_checked_index, row_index, state);
+			}
+			// The anchor always moves to the row just clicked, shift or not, so a second
+			// shift-click extends from the previous one rather than from the original click.
+			this._last_checked_index = row_index;
+		});
+	}
+
+	/**
+	 * rowIndexes in VISUAL order. rowIndex is assigned at load and never changes; sorting only
+	 * reorders `datamanager.rowViewOrder` (DataManager.prepareRowView, dist :2124-2129, and
+	 * _sortRows, :2195), which is exactly what BodyRenderer.renderRows walks to paint the grid
+	 * (dist :4863-4870). So a range that is contiguous on screen is contiguous in rowViewOrder,
+	 * not in rowIndex.
+	 */
+	visual_order() {
+		const dm = this.datatable && this.datatable.datamanager;
+		const order = dm && dm.rowViewOrder;
+		if (!order || !order.length) return this.view.map((_, i) => i);
+		const renderer = this.datatable.bodyRenderer;
+		if (renderer && renderer.visibleRowIndices && renderer.visibleRowIndices.length) {
+			const visible = new Set(renderer.visibleRowIndices);
+			return order.filter((i) => visible.has(i));
+		}
+		return order.slice();
+	}
+
+	check_range(anchor_index, target_index, state) {
+		const order = this.visual_order();
+		const from = order.indexOf(anchor_index);
+		const to = order.indexOf(target_index);
+		if (from < 0 || to < 0) return;
+		const [start, end] = from < to ? [from, to] : [to, from];
+
+		// checkRow fires onCheckRow per row, and update_footer counts the whole checkMap each
+		// time — O(n^2) over a long range. Repaint the footer once, at the end.
+		this._suspend_footer = true;
+		try {
+			for (let i = start; i <= end; i++) {
+				const row_index = order[i];
+				// The datatable already toggled the clicked row; toggling it again here would
+				// undo it.
+				if (row_index === target_index) continue;
+				this.datatable.rowmanager.checkRow(row_index, state);
+			}
+		} finally {
+			this._suspend_footer = false;
+		}
+		this.update_footer();
+	}
+
+	render_flag(row, flag) {
+		if (this.constructor.SUBMIT_FLAGS.includes(flag) && !row.is_submittable) {
+			return '<span class="pp-flag-na">·</span>';
+		}
+		// Server-enforced invariant (_parse_changes): Report cannot be set on a row
+		// that is Only If Creator. Show it the same way as an inapplicable submit flag.
+		if (flag === "report" && row.if_owner) {
+			return '<span class="pp-flag-na">·</span>';
+		}
+		// A row staged for deletion is not editable — its flags are about to be moot.
+		if (row.is_removed) {
+			return `<span class="pp-flag">${row[flag] ? "✓" : ""}</span>`;
+		}
+		const value = row[flag] ? 1 : 0;
+		const dirty = this.dirty[row.key] && flag in this.dirty[row.key];
+		const cls = `pp-flag${dirty ? " pp-dirty" : ""}`;
+		if (!this.can_edit) {
+			return `<span class="${cls}">${value ? "✓" : ""}</span>`;
+		}
+		return `<input type="checkbox" class="${cls}" data-key="${frappe.utils.escape_html(row.key)}" data-flag="${flag}"${value ? " checked" : ""}>`;
+	}
+
+	refresh_row(row) {
+		const index = this.view.indexOf(row);
+		if (index < 0) return;
+		// refreshRow repaints the row's DOM, which only exists inside the virtual window
+		// (~50 rows); for any other row CellManager.refreshCell sets innerHTML on null and
+		// throws, which silently aborted a bulk apply mid-loop. Off-screen rows need no
+		// repaint: every formatter reads the live object in data[], so they show current
+		// values the moment they scroll into view.
+		const first_col = this.first_data_col_index();
+		if (!this.datatable.cellmanager.getCell$(first_col, index)) return;
+		// refreshRow wants an ARRAY of cell values (DataManager.updateRow -> prepareRow
+		// calls row.map), not the row object. The object is still what format() sees:
+		// the datatable keeps our objects in data[] untouched and we mutate them in place.
+		this.datatable.refreshRow(this.columns.map((c) => row[c.id]), index);
+		// DataManager.updateRow pads our (shorter) row to the datatable's column count
+		// with a hardcoded unchecked '<input type="checkbox" />' for the _checkbox
+		// column, and refreshRow repaints column 0 with it — even though
+		// rowmanager.checkMap[index] still says the row is selected. Left alone, a bulk
+		// apply visually un-selects every on-screen selected row while the footer still
+		// reports them as selected. Restore the visual state from the model.
+		const rm = this.datatable.rowmanager;
+		if (rm.checkMap && rm.checkMap[index]) rm.checkRow(index, true);
+	}
+
+	// ── dirty store ────────────────────────────────────────────────────────────
+
+	/** @returns false when the edit was refused, true otherwise. */
+	set_flag(row, flag, value) {
+		if (!row || !this.can_edit) return false;
+		if (this.constructor.SUBMIT_FLAGS.includes(flag) && !row.is_submittable) return false;
+		// A rule with no basic rights is rejected by the server, and by frappe itself only
+		// after the rows are written — so the entire commit rolls back on one stray
+		// checkbox, with a message that names neither the rule nor the flag. Refuse it
+		// here, while it is still a single click the admin can see. Deleting the rule is
+		// the way to take away all of its rights, and that is what the message says.
+		if (!value && row[flag] && this.last_basic_right(row, flag)) return false;
+
+		this.original = this.original || {};
+		this.original[row.key] = this.original[row.key] || {};
+		if (!(flag in this.original[row.key])) this.original[row.key][flag] = row[flag] ? 1 : 0;
+
+		row[flag] = value ? 1 : 0;
+
+		const changes = (this.dirty[row.key] = this.dirty[row.key] || {});
+		if (row[flag] === this.original[row.key][flag]) {
+			delete changes[flag];
+			if (!Object.keys(changes).length) delete this.dirty[row.key];
+		} else {
+			changes[flag] = row[flag];
+		}
+		this.refresh_row(row);
+		this.update_footer();
+		return true;
+	}
+
+	/** True when `flag` is the only basic right this row still has set. */
+	last_basic_right(row, flag) {
+		const basic = this.constructor.BASIC_RIGHTS;
+		return basic.includes(flag) && !basic.some((f) => f !== flag && row[f]);
+	}
+
+	checked_rows() {
+		return this.datatable.rowmanager.getCheckedRows().map((i) => this.view[i]).filter(Boolean);
+	}
+
+	bulk_apply(flag, value) {
+		// A row staged for deletion is not editable — render_flag already makes its cells
+		// inert, and re-dirtying it here would only inflate change_count().
+		const rows = this.checked_rows().filter((r) => !r.is_removed);
+		if (!rows.length) {
+			frappe.show_alert({ message: __("Select some rows first"), indicator: "orange" });
+			return;
+		}
+		// set_flag() refuses an edit that would leave a rule with no basic rights. Count
+		// what actually applied rather than reporting the whole selection: silently
+		// skipping rows was how a bulk clear used to look like it had worked.
+		//
+		// The blocked count is derived from the same predicate set_flag() uses, NOT from
+		// (selected - applied): set_flag also declines submit/cancel/amend on a
+		// non-submittable doctype, and attributing those to the basic-rights rule would
+		// be a lie. Those rows just do not count as applied, which is what they are.
+		const blocked = value
+			? 0
+			: rows.filter((row) => row[flag] && this.last_basic_right(row, flag)).length;
+		const applied = rows.filter((row) => this.set_flag(row, flag, value) !== false).length;
+		frappe.show_alert({
+			message: __("{0} set to {1} on {2} rows", [frappe.unscrub(flag), value ? __("on") : __("off"), applied]),
+			indicator: "blue",
+		});
+		if (blocked) {
+			frappe.show_alert({
+				message: __("{0} row(s) skipped: a rule cannot lose its last basic right.", [blocked]),
+				indicator: "orange",
+			});
+		}
+	}
+
+	change_payload() {
+		const identity = (row) => ({
+			doctype: row.doctype, role: row.role, permlevel: row.permlevel, if_owner: row.if_owner,
+		});
+		return [
+			...Object.values(this.pending_removes).map((row) => ({ op: "remove", ...identity(row) })),
+			...Object.values(this.pending_adds).map((row) => ({ op: "add", ...identity(row) })),
+			// stage_remove() already drops a removed row's dirty entry; this filter is the
+			// last line of defence before the server, because a stray update+remove pair
+			// for one identity rolls the entire commit back.
+			...Object.entries(this.dirty)
+				.filter(([key]) => !this.pending_removes[key])
+				.map(([key, changes]) => ({
+					op: "update",
+					...identity(this.by_key[key]),
+					changes: { ...changes },
+				})),
+		];
+	}
+
+	// ── staged adds and removes ────────────────────────────────────────────────
+
+	/** Total unsaved changes: flag edits + staged adds + staged removes. */
+	change_count() {
+		return (
+			Object.keys(this.dirty).length +
+			Object.keys(this.pending_adds).length +
+			Object.keys(this.pending_removes).length
+		);
+	}
+
+	/**
+	 * Stage a brand-new rule. The row joins this.rows so it sorts, filters and renders
+	 * like any other, but it exists only in the browser until Commit.
+	 */
+	stage_add({ doctype, role, permlevel, if_owner }) {
+		const meta = this.rows.find((r) => r.doctype === doctype);
+		const row = {
+			doctype,
+			role,
+			permlevel: permlevel || 0,
+			if_owner: if_owner ? 1 : 0,
+			module: meta ? meta.module : "",
+			is_submittable: meta ? meta.is_submittable : 0,
+			is_custom: 1,
+			is_new: 1,
+		};
+		this.constructor.FLAGS.forEach((f) => (row[f] = 0));
+		row.read = 1; // the server seeds read: 1; show the same thing
+		row.key = this.key_of(row);
+		if (this.by_key[row.key]) {
+			frappe.show_alert({ message: __("That rule already exists"), indicator: "orange" });
+			return null;
+		}
+		this.rows.push(row);
+		this.by_key[row.key] = row;
+		this.pending_adds[row.key] = row;
+		this.apply_filters();
+		this.update_footer();
+		return row;
+	}
+
+	/** Stage existing rows for deletion. A staged add is simply dropped instead. */
+	stage_remove(rows) {
+		let dropped_edits = 0;
+		rows.forEach((row) => {
+			if (row.is_new) {
+				// unstage() drops the row from by_key and rows, so an edit left in
+				// this.dirty would outlive its row and make change_payload() evaluate
+				// identity(undefined) and throw. Forget the edit before dropping the row.
+				delete this.dirty[row.key];
+				delete this.original[row.key];
+				this.unstage(row.key);
+				return;
+			}
+			// Pending flag edits on a rule you are deleting are moot, and leaving them in
+			// this.dirty would emit BOTH an update and a remove op for one identity. The
+			// server applies removals before updates, so the update would then find no row
+			// and roll the whole commit back. Restore the row's loaded values first so the
+			// grid stops showing an edit that is no longer staged, then forget the edit.
+			if (this.dirty[row.key]) dropped_edits++;
+			Object.entries(this.original[row.key] || {}).forEach(([flag, v]) => (row[flag] = v));
+			delete this.dirty[row.key];
+			delete this.original[row.key];
+			row.is_removed = 1;
+			this.pending_removes[row.key] = row;
+		});
+		this.apply_filters();
+		// apply_filters() drops the datatable's selection (its checkbox map is by index and
+		// means nothing across a rebuild), which would leave the rows we just staged
+		// unselected — and Restore Selected reads the selection, so undoing a removal would
+		// need the admin to hunt down the struck rows and re-tick them. Put the selection
+		// back on exactly the rows still in view.
+		this.reselect(rows);
+		this.update_footer();
+		let message = __("{0} rule(s) staged for deletion. Nothing is deleted until you commit.", [
+			rows.length,
+		]);
+		// Said here because here is where it is still true: the edits have just been
+		// dropped, and Restore Selected cannot bring them back.
+		if (dropped_edits) {
+			message += " " + __("Flag edits on {0} of them were dropped.", [dropped_edits]);
+		}
+		frappe.show_alert({ message, indicator: "orange" });
+	}
+
+	/** Re-check the given rows in the datatable, for the ones still in the current view. */
+	reselect(rows) {
+		const rm = this.datatable.rowmanager;
+		if (!rm) return;
+		this._suspend_footer = true;
+		try {
+			rows.forEach((row) => {
+				const index = this.view.indexOf(row);
+				if (index >= 0) rm.checkRow(index, true);
+			});
+		} finally {
+			this._suspend_footer = false;
+		}
+	}
+
+	/**
+	 * Undo a staged deletion. The rows were never touched on the server, so clearing the
+	 * mark is the whole job — but note stage_remove() restored their loaded flag values
+	 * and forgot any pending edits, so a restored row comes back as it was loaded, not as
+	 * it was when you removed it. That is why stage_remove() says so at the time.
+	 */
+	unstage_remove(rows) {
+		rows.forEach((row) => {
+			delete row.is_removed;
+			delete this.pending_removes[row.key];
+		});
+		this.apply_filters();
+		this.update_footer();
+		frappe.show_alert({
+			message: __("{0} rule(s) restored.", [rows.length]),
+			indicator: "blue",
+		});
+	}
+
+	add_rule_dialog() {
+		const d = new frappe.ui.Dialog({
+			title: __("Add Permission Rule"),
+			fields: [
+				{
+					fieldtype: "Link", fieldname: "doctype_name", label: __("Document Type"),
+					options: "DocType", reqd: 1,
+					get_query: () => ({
+						filters: { istable: 0, name: ["not in", this.constructor.NOT_ADDABLE_DOCTYPES] },
+					}),
+				},
+				{
+					fieldtype: "Link", fieldname: "role", label: __("Role"), options: "Role", reqd: 1,
+					get_query: () => ({ filters: { disabled: 0, name: ["not in", this.excluded_roles()] } }),
+				},
+				{ fieldtype: "Int", fieldname: "permlevel", label: __("Level"), default: 0 },
+				{ fieldtype: "Check", fieldname: "if_owner", label: __("Only If Creator"), default: 0 },
+			],
+			primary_action_label: __("Stage Rule"),
+			primary_action: (values) => {
+				const row = this.stage_add({
+					doctype: values.doctype_name,
+					role: values.role,
+					permlevel: values.permlevel,
+					if_owner: values.if_owner,
+				});
+				if (!row) return; // duplicate; stage_add already said so
+				d.hide();
+				frappe.show_alert({
+					message: __("Staged. It is created when you commit."),
+					indicator: "blue",
+				});
+			},
+		});
+		d.show();
+	}
+
+	/** Drop a staged add entirely — it never existed on the server. */
+	unstage(key) {
+		const row = this.by_key[key];
+		if (!row) return;
+		// Staged adds only. A server-backed row must never be spliced out of this.rows —
+		// that would drop a real rule from the client model with nothing to restore it.
+		if (!row.is_new) return;
+		delete this.pending_adds[key];
+		delete this.by_key[key];
+		const i = this.rows.indexOf(row);
+		if (i >= 0) this.rows.splice(i, 1);
+	}
+
+	discard() {
+		Object.keys(this.dirty).forEach((key) => {
+			const row = this.by_key[key];
+			Object.entries(this.original[key] || {}).forEach(([flag, v]) => (row[flag] = v));
+		});
+		// Staged adds never existed on the server, so drop the rows outright. Staged
+		// removes are real rows; just clear the mark.
+		Object.keys(this.pending_adds).forEach((key) => this.unstage(key));
+		Object.values(this.pending_removes).forEach((row) => delete row.is_removed);
+		this.dirty = {};
+		this.original = {};
+		this.pending_adds = {};
+		this.pending_removes = {};
+		this.hide_stale_notice();
+		this.apply_filters();
+		this.update_footer();
+	}
+
+	// ── unsaved-changes guard ──────────────────────────────────────────────────
+
+	/**
+	 * Bound once per instance, and there is no teardown for the page, so it stays for the
+	 * life of the tab. It reads this.dirty live rather than closing over a snapshot, so a
+	 * clean store never prompts.
+	 */
+	bind_unload_guard() {
+		if (this._unload_guard) return;
+		this._unload_guard = (e) => {
+			if (!this.change_count()) return undefined;
+			// preventDefault() is what modern browsers act on; returnValue is the legacy
+			// spelling older ones still need. Neither shows our text — browsers use their own.
+			e.preventDefault();
+			const message = __("You have {0} unsaved permission change(s).", [
+				this.change_count(),
+			]);
+			e.returnValue = message;
+			return message;
+		};
+		window.addEventListener("beforeunload", this._unload_guard);
+	}
+
+	/**
+	 * Fired by the page container every time this page is shown (container.js:80 ->
+	 * pageview.js:104-108), including once right after on_page_load. Clean: reload, so the
+	 * grid is never stale. Dirty: keep the change set — the router already navigated away and
+	 * back, and silently discarding edits would be worse than showing them again — and say so.
+	 */
+	on_show() {
+		if (this._first_show_pending) {
+			this._first_show_pending = false;
+			return;
+		}
+		// First load failed, or is still in flight: it will render on its own.
+		// A commit is in flight too: commit() already called hide_stale_notice()
+		// and will call load() itself once it settles, so treat it the same way —
+		// reloading here would race the commit and could repaint the stale notice
+		// commit() just suppressed, right before its own callback clears this.dirty.
+		if (this._loading || this._committing || !this.rows) return;
+
+		if (!this.change_count()) {
+			this.load();
+			return;
+		}
+		this.show_stale_notice();
+		frappe.show_alert({
+			message: __("{0} unsaved permission change(s) are still pending", [
+				this.change_count(),
+			]),
+			indicator: "orange",
+		});
+	}
+
+	show_stale_notice() {
+		if (!this.change_count() || !this.$filters) return;
+		// Rebuilt only when it is not on the page: render() empties $body, which detaches it.
+		// on_show() can fire any number of times without stacking notices or handlers.
+		if (!this.$stale || !this.$stale.parent().length) {
+			this.$stale = $(`
+				<div class="pp-perm-stale alert alert-warning">
+					<span class="pp-perm-stale-text"></span>
+					<button class="btn btn-xs btn-default pp-stale-review">${__("Review")}</button>
+					<button class="btn btn-xs btn-default pp-stale-discard">${__("Discard")}</button>
+					<button class="btn btn-xs btn-link pp-stale-dismiss" title="${__("Dismiss")}">&times;</button>
+				</div>`);
+			this.$stale.find(".pp-stale-review").on("click", () => this.review());
+			this.$stale.find(".pp-stale-discard").on("click", () => this.discard());
+			this.$stale.find(".pp-stale-dismiss").on("click", () => this.hide_stale_notice());
+			this.$stale.insertBefore(this.$filters);
+		}
+		this.$stale
+			.find(".pp-perm-stale-text")
+			.text(
+				__("{0} unsaved change(s) from earlier. Review to commit them, or Discard.", [
+					this.change_count(),
+				])
+			);
+	}
+
+	hide_stale_notice() {
+		if (this.$stale) this.$stale.remove();
+		this.$stale = null;
+	}
+
+	// ── footer + bulk menu ─────────────────────────────────────────────────────
+
+	make_footer() {
+		if (!this.can_edit) {
+			// A read-only viewer gets no actions. The page object outlives a reload, so clear
+			// them rather than assume they were never set.
+			this.page.clear_primary_action();
+			this.page.clear_secondary_action();
+			if (this.$discard_btn) this.$discard_btn.hide();
+			if (this.$add_btn) this.$add_btn.hide();
+			if (this.$remove_btn) this.$remove_btn.hide();
+			return;
+		}
+		this.$footer = $(`
+			<div class="pp-perm-footer">
+				<span class="pp-perm-count"></span>
+			</div>`).appendTo(this.$body);
+
+		// Commit and Review live in the page's own primary and secondary slots, top right,
+		// where every other thinkNXG page puts them. Only the grid-scoped controls (the count
+		// and the bulk apply) stay in the footer.
+		this.page.set_primary_action(__("Commit"), () => this.review());
+		this.page.set_secondary_action(__("Review"), () => this.review());
+		this.make_actions_menu();
+
+		// Bulk apply lives in the footer too: pick a flag, then Set or Clear it on the
+		// checked rows. (Fifteen flags x set/clear as a dropdown would be thirty items.)
+		this.$bulk = $(`
+			<span class="pp-perm-bulk">
+				<select class="form-control input-sm pp-bulk-flag"></select>
+				<button class="btn btn-default btn-sm pp-bulk-set">${__("Set on")}</button>
+				<button class="btn btn-default btn-sm pp-bulk-clear">${__("Set off")}</button>
+			</span>`).insertAfter(this.$footer.find(".pp-perm-count"));
+		const $select = this.$bulk.find(".pp-bulk-flag");
+		this.constructor.FLAGS.forEach((flag) =>
+			$select.append(`<option value="${flag}">${frappe.unscrub(flag)}</option>`)
+		);
+		this.$bulk.find(".pp-bulk-set").on("click", () => this.bulk_apply($select.val(), 1));
+		this.$bulk.find(".pp-bulk-clear").on("click", () => this.bulk_apply($select.val(), 0));
+	}
+
+	/**
+	 * Everything that acts on rows or on the change set goes in one "Actions" dropdown.
+	 * These were four separate add_button() calls, which put four buttons plus Review and
+	 * Commit in the header — too many to scan, and add_button() is btn-default so none of
+	 * them read as more or less consequential than the others.
+	 *
+	 * add_custom_button_group() appends a NEW group every call and render() runs on every
+	 * page load, so the group and its items are built once and kept on the instance.
+	 * `standard: true` on each item appends in the order written; falsy would insert each
+	 * one above a divider, reversing them.
+	 */
+	make_actions_menu() {
+		if (this.$actions_menu) return;
+		this.$actions_menu = this.page.add_custom_button_group(__("Actions"));
+		const item = (label, click) =>
+			this.page.add_custom_menu_item(this.$actions_menu, label, click, true).parent();
+
+		this.$add_item = item(__("Add Rule"), () => this.add_rule_dialog());
+
+		this.$remove_item = item(__("Remove Selected"), () => {
+			const rows = this.checked_rows().filter((r) => !r.is_removed);
+			if (!rows.length) {
+				frappe.show_alert({ message: __("Select some rows first"), indicator: "orange" });
+				return;
+			}
+			this.stage_remove(rows);
+		});
+
+		// Undoing one staged deletion used to mean Discard, which throws away every other
+		// unsaved change with it. Shown only while something is staged for deletion, the
+		// same way Discard is shown only while there is anything to discard.
+		this.$restore_item = item(__("Restore Selected"), () => {
+			const rows = this.checked_rows().filter((r) => r.is_removed);
+			if (!rows.length) {
+				frappe.show_alert({
+					message: __("Select some rows that are staged for deletion first"),
+					indicator: "orange",
+				});
+				return;
+			}
+			this.unstage_remove(rows);
+		});
+
+		this.$discard_item = item(__("Discard"), () => this.discard());
+	}
+
+	update_footer() {
+		// check_range() sets this while it walks a range: every checkRow fires onCheckRow, and
+		// counting the whole checkMap per row is quadratic. It repaints once when it is done.
+		if (this._suspend_footer) return;
+		const n = this.change_count();
+		// The notice quotes the same count as the footer, so they cannot disagree.
+		if (this.$stale && this.$stale.parent().length) {
+			if (n) this.show_stale_notice();
+			else this.hide_stale_notice();
+		}
+		if (!this.$footer) return;
+		const selected = this.checked_rows().length;
+		this.$footer.find(".pp-perm-count").text(
+			n
+				? __("{0} unsaved rule change(s), {1} row(s) selected", [n, selected])
+				: __("No unsaved changes, {0} row(s) selected", [selected])
+		);
+		// The actions now live on the page, not in the footer.
+		this.page.btn_primary.prop("disabled", !n);
+		this.page.btn_secondary.prop("disabled", !n);
+		// Menu items, not buttons: add_custom_menu_item() hands back the <a>, so these are
+		// its <li>. Add Rule and Remove Selected always apply, so they never toggle.
+		if (this.$discard_item) this.$discard_item.toggle(!!n);
+		if (this.$restore_item) {
+			this.$restore_item.toggle(!!Object.keys(this.pending_removes).length);
+		}
+	}
+
+	// ── review + commit ────────────────────────────────────────────────────────
+
+	review() {
+		const changes = this.change_payload();
+		if (!changes.length) return;
+		frappe.call({
+			method: "thinknxg_powerpack.permission_manager.preview_changes",
+			args: { changes },
+			callback: (r) => this.render_review(r.message, changes),
+		});
+	}
+
+	render_review(preview, changes) {
+		const removals = preview.rules.filter((r) => r.op === "remove");
+		const additions = preview.rules.filter((r) => r.op === "add");
+		const by_doctype = {};
+		preview.rules
+			.filter((r) => r.op === "update")
+			.forEach((rule) => (by_doctype[rule.doctype] = by_doctype[rule.doctype] || []).push(rule));
+
+		const rule_name = (r) =>
+			`${frappe.utils.escape_html(r.doctype)} → ${frappe.utils.escape_html(r.role)}` +
+			`${r.permlevel ? ` (${__("level {0}", [r.permlevel])})` : ""}` +
+			`${r.if_owner ? ` (${__("only if creator")})` : ""}`;
+
+		const flag_list = (rule) =>
+			Object.entries(rule.changes)
+				.map(([f, v]) => `<code>${frappe.unscrub(f)} ${v ? "on" : "off"}</code>`)
+				.join(" ");
+
+		let html = "";
+		if (preview.detaching.length) {
+			html += `<div class="pp-review-detach">
+				<b>${__("{0} document type(s) will be detached from app updates", [preview.detaching.length])}</b>
+				<p class="small">${__(
+					"Their standard rules get copied into Custom DocPerm and, from then on, permission changes shipped by thinkNXG, thinkNXG ERP or any app on bench migrate no longer apply to them. This is permanent until reset in thinkNXG's Role Permissions Manager."
+				)}</p>
+				<ul>${preview.detaching
+					.map((d) => `<li>${frappe.utils.escape_html(d.doctype)} <span class="text-muted">(${__("{0} standard rules frozen", [d.standard_rules])})</span></li>`)
+					.join("")}</ul>
+			</div>`;
+		}
+		if (removals.length) {
+			html += `<div class="pp-review-remove">
+				<b>${__("{0} rule(s) will be DELETED", [removals.length])}</b>
+				<p class="small">${__("The role loses this access entirely. Re-creating it later starts from Read only.")}</p>
+				<ul>${removals.map((r) => `<li>${rule_name(r)}</li>`).join("")}</ul>
+			</div>`;
+		}
+		if (additions.length) {
+			html += `<div class="pp-review-add">
+				<b>${__("{0} rule(s) will be created", [additions.length])}</b>
+				<p class="small">${__("Each starts with Read only; set the rest afterwards.")}</p>
+				<ul>${additions.map((r) => `<li>${rule_name(r)}</li>`).join("")}</ul>
+			</div>`;
+		}
+		html += Object.entries(by_doctype)
+			.map(
+				([doctype, rules]) => `<div class="mb-3"><b>${frappe.utils.escape_html(doctype)}</b><ul>${rules
+					.map(
+						(rule) => `<li>${frappe.utils.escape_html(rule.role)}${
+							rule.permlevel ? ` (level ${rule.permlevel})` : ""
+						}${rule.if_owner ? ` (${__("only if creator")})` : ""}: ${flag_list(rule)}</li>`
+					)
+					.join("")}</ul></div>`
+			)
+			.join("");
+
+		const d = new frappe.ui.Dialog({
+			title: __("Review {0} change(s)", [preview.rules.length]),
+			size: "large",
+			fields: [{ fieldtype: "HTML", fieldname: "body", options: `<div class="pp-perm-review">${html}</div>` }],
+			primary_action_label: __("Commit"),
+			primary_action: () => {
+				d.hide();
+				this.commit(changes);
+			},
+		});
+		d.show();
+	}
+
+	commit(changes) {
+		// A page navigated away and back while this call is in flight must not show
+		// "unsaved changes from earlier": there aren't any yet — they are mid-commit.
+		// on_show() checks this._committing and does nothing while it is true.
+		this.hide_stale_notice();
+		this._committing = true;
+		frappe.call({
+			method: "thinknxg_powerpack.permission_manager.commit_changes",
+			args: { changes },
+			freeze: true,
+			freeze_message: __("Committing permission changes…"),
+			callback: (r) => {
+				this._committing = false;
+				const out = r.message;
+				const parts = [__("{0} rule change(s)", [out.rules])];
+				if (out.added) parts.push(__("{0} created", [out.added]));
+				if (out.removed) parts.push(__("{0} deleted", [out.removed]));
+				frappe.show_alert(
+					{
+						message: __("Committed {0} across {1} document type(s)", [
+							parts.join(", "),
+							out.doctypes,
+						]),
+						indicator: "green",
+					},
+					7
+				);
+				// Reload from the server so is_custom flags and any server-side normalisation
+				// (e.g. validate_permissions zeroing create at level > 0) are reflected — the
+				// server persists that normalisation now, so this reload shows the actual
+				// values Custom DocPerm holds, not a stale pre-normalisation echo of ours.
+				this.load();
+			},
+			error: () => {
+				// The server already showed the offending rule; nothing was written, so
+				// this.dirty must survive untouched — the user's change set is still valid
+				// and still needs a Commit.
+				this._committing = false;
+			},
+		});
+	}
+};

@@ -1,0 +1,13 @@
+[pre_model_sync]
+# Patches added in this section will be executed before doctypes are migrated
+# Read docs to understand patches: https://docs.thinknxg.com/thinknxgframework/database-migrations
+
+[post_model_sync]
+# Patches added in this section will be executed after doctypes are migrated
+thinknxg_powerpack.patches.v1.rename_quotation_custom_warehouse
+thinknxg_powerpack.patches.v1.default_qp_update_stock
+thinknxg_powerpack.patches.v1.add_mpesa_c2b_index
+thinknxg_powerpack.patches.v1.default_email_group_powerup
+thinknxg_powerpack.patches.v1.default_sales_margin_bands
+thinknxg_powerpack.patches.v1.default_copy_as_image
+thinknxg_powerpack.patches.v1.drop_pos_powerup

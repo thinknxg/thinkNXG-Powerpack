@@ -1,0 +1,282 @@
+/**
+ * thinkNXG PowerPack - Global Styles
+ * 
+ * Include in hooks.py:
+ * app_include_css = "/assets/thinknxg_powerpack/css/thinknxg_powerpack.css"
+ */
+
+/* Add your custom styles here */
+
+/* Compact theme styles (enabled via PowerPack Settings) */
+body.compact-theme {
+    line-height: 1em !important;
+    --input-height: 22px;
+    --btn-height: 22px;
+    --list-row-height: 22px;
+    --grid-padding: 6px 8px;
+}
+
+body.compact-theme .grid-body .grid-static-col[data-fieldtype="Text Editor"] .ql-editor {
+    line-height: 1 !important;
+    font-size: 10px;
+}
+
+/* Quill zeroes its padding only on `.ql-editor.read-mode` (the idle cell). The live
+   editor keeps Quill's stock 12px/15px, which would make a focused Text Editor cell
+   ~24px taller than the same cell when idle. Match the idle cell instead; .input-area
+   below still supplies the 2px side gutter. */
+body.compact-theme .grid-body .grid-static-col[data-fieldtype="Text Editor"] .ql-editor:not(.read-mode) {
+    padding: 0 !important;
+}
+
+/* Filter row: shrink the match-type (=/like) button to match the compact input */
+body.compact-theme .match-type-dropdown-btn {
+    min-height: var(--input-height);
+    padding-top: 0;
+    padding-bottom: 0;
+    line-height: 1;
+}
+
+/* List header: shrink Filter / clear / sort-order / sort-field buttons to match input height */
+body.compact-theme .filter-section .btn-sm,
+body.compact-theme .sort-selector .btn-sm {
+    min-height: var(--input-height);
+    height: var(--input-height);
+    padding-top: 0;
+    padding-bottom: 0;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+}
+
+/* List view: tighten row padding so --list-row-height actually takes effect */
+body.compact-theme .list-row .level-left,
+body.compact-theme .list-row .level-right {
+    padding-top: 2px;
+    padding-bottom: 2px;
+}
+
+/* List view: shrink row text to match the 22px row height (scoped to .list-row only;
+   never override --text-base globally — it cascades through the entire Desk) */
+body.compact-theme .list-row {
+    font-size: var(--text-xs);
+}
+
+/* Report View (frappe-datatable): font-only compact.
+   Row height is JS-driven via the `cellHeight` option and used for virtual-scroll
+   positioning (rows are absolutely-placed at top = N * cellHeight). Overriding
+   .dt-row { height } via CSS would desync positions and corrupt the layout, so
+   we only shrink the font here. Cascades into .dt-cell__content (header + body)
+   since neither sets its own font-size. */
+body.compact-theme .datatable {
+    font-size: var(--text-xs);
+}
+
+.thinknxg-card {
+    background: white;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+    transition: all 0.3s ease;
+}
+
+.thinknxg-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.12);
+}
+
+.thinknxg-primary-btn {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border: none;
+    color: white;
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-weight: 600;
+    transition: all 0.3s ease;
+}
+
+.thinknxg-primary-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+}
+
+/* Unset thinkNXG's fixed 43px row-cell height; cells size to content */
+body.compact-theme .grid-body .grid-static-col,
+body.compact-theme .grid-body .row-index {
+	height: unset !important;
+	max-height: 200px;
+}
+
+/* Constrain the leftmost checkbox column so it doesn't inflate the flex row height.
+   Before this rule, row-check had no compact override and stayed at thinkNXG's default
+   32-43px, stretching all sibling flex cells to match — making focus borders too tall. */
+body.compact-theme .grid-body .row-check {
+	height: var(--input-height) !important;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+/* Check cells in STATIC rows only: centre the tick icon and neutralise thinkNXG's offset nudges.
+   Scoped to .data-row to avoid interfering with the editable-row form control layout. */
+body.compact-theme .grid-body .data-row .grid-static-col[data-fieldtype="Check"] {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+body.compact-theme .grid-body .data-row .grid-static-col[data-fieldtype="Check"] .static-area {
+	padding-top: 0 !important;
+	margin-bottom: 0 !important;
+}
+
+/* Check cells in EDITABLE rows: constrain height and centre the checkbox input.
+   thinkNXG's .checkbox label has align-items:start + padding-top:2.5px which pushes
+   the tick/input toward the top; we override the whole chain to centre it properly. */
+body.compact-theme .grid-body .editable-row .grid-static-col[data-fieldtype="Check"] {
+	height: var(--input-height) !important;
+	overflow: hidden;
+}
+body.compact-theme .grid-body .editable-row [data-fieldtype="Check"] .field-area,
+body.compact-theme .grid-body .editable-row [data-fieldtype="Check"] .form-group,
+body.compact-theme .grid-body .editable-row [data-fieldtype="Check"] .checkbox {
+	height: var(--input-height) !important;
+}
+/* The label is the last centering step; neutralise padding-top and align-items: start */
+body.compact-theme .grid-body .editable-row [data-fieldtype="Check"] .checkbox label {
+	display: flex !important;
+	align-items: center !important;
+	justify-content: center !important;
+	padding-top: 0 !important;
+	height: var(--input-height) !important;
+}
+/* .input-area wraps the actual <input type="checkbox">; shrink it to the checkbox-size */
+body.compact-theme .grid-body .editable-row [data-fieldtype="Check"] .checkbox .input-area {
+	height: var(--checkbox-size) !important;
+	display: flex !important;
+	align-items: center !important;
+}
+
+/* Grid cell edit mode: keep inputs at the same compact height as static cells */
+body.compact-theme .grid-body .editable-row .form-group {
+	margin-bottom: 0;
+}
+body.compact-theme .grid-body .editable-row .field-area {
+	height: var(--input-height);
+}
+body.compact-theme .grid-body .editable-row .input-area {
+	padding: 0 2px;
+}
+body.compact-theme .grid-body .editable-row .form-control,
+body.compact-theme .grid-body .editable-row .input-with-feedback {
+	min-height: unset !important;
+	height: var(--input-height) !important;
+	padding: 0 8px !important;
+}
+body.compact-theme .grid-body .editable-row .form-control:focus {
+	box-shadow: none !important;
+}
+
+/* Multi-line cells keep sizing to content while the row is focused.
+   The --input-height pin above is correct for single-line controls (Data, Link,
+   Currency, Select) but wrong for Text Editor / Small Text / Text / Long Text / Code:
+   it clamps the live control to one line, so clicking a row with a 3-line description
+   made that row SHRINK to 32px while every idle row around it stayed 92px tall. These
+   rules mirror the `height: unset !important; max-height: 200px` applied to
+   .grid-static-col above, so a focused row is the same height as its idle self. */
+body.compact-theme .grid-body .editable-row .grid-static-col[data-fieldtype="Text Editor"] .field-area,
+body.compact-theme .grid-body .editable-row .grid-static-col[data-fieldtype="Small Text"] .field-area,
+body.compact-theme .grid-body .editable-row .grid-static-col[data-fieldtype="Text"] .field-area,
+body.compact-theme .grid-body .editable-row .grid-static-col[data-fieldtype="Long Text"] .field-area,
+body.compact-theme .grid-body .editable-row .grid-static-col[data-fieldtype="Code"] .field-area {
+	height: auto !important;
+	max-height: 200px;
+}
+/* thinkNXG zeroes .grid-static-col padding on editable rows so inputs fill the cell, and
+   re-adds var(--grid-padding) for the fieldtypes that render bare (Button, row-index).
+   Text Editor is bare too — Quill draws no input chrome in a grid — so without this the
+   focused cell is 16px wider than its idle self and the same text wraps to one line
+   fewer, leaving the row 22px shorter on focus even once it is free to grow. */
+body.compact-theme .grid-body .editable-row .grid-static-col[data-fieldtype="Text Editor"] {
+	padding: var(--grid-padding) !important;
+}
+
+/* Small Text / Text / Long Text / Code render a <textarea class="form-control">, which
+   the blanket rule above pins to one line; Text Editor renders Quill and is unaffected. */
+body.compact-theme .grid-body .editable-row .grid-static-col[data-fieldtype="Small Text"] .form-control,
+body.compact-theme .grid-body .editable-row .grid-static-col[data-fieldtype="Text"] .form-control,
+body.compact-theme .grid-body .editable-row .grid-static-col[data-fieldtype="Long Text"] .form-control,
+body.compact-theme .grid-body .editable-row .grid-static-col[data-fieldtype="Code"] .form-control {
+	height: auto !important;
+	min-height: var(--input-height) !important;
+	max-height: 200px;
+	overflow-y: auto !important;
+	padding: 2px 8px !important;
+}
+
+body.compact-theme .grid-body .editable-row .frappe-control[data-fieldtype="Select"].form-group .select-icon {
+	top: 0;
+}
+body.compact-theme .grid-body .editable-row .link-btn {
+	margin-top: 0;
+}
+/* Remove thinkNXG's margin-top on all editable-row checkboxes (grid.scss adds 8px by default) */
+body.compact-theme .grid-body .editable-row .checkbox {
+	margin-top: 0 !important;
+}
+
+/* ── Min Selling Price Rule Tree (PowerPack Settings) ── */
+.msp-tree { border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; font-size: 12px; margin-top: 8px; }
+.msp-tree-row { display: flex; align-items: center; gap: 7px; padding: 5px 10px; border-bottom: 1px solid var(--border-color); transition: background 0.1s; }
+.msp-tree-row:last-child { border-bottom: none; }
+.msp-tree-row:hover { background: var(--bg-color); }
+.msp-tree-row.msp-has-rule { background: rgba(99,102,241,0.05); }
+[data-theme="dark"] .msp-tree-row.msp-has-rule { background: rgba(99,102,241,0.1); }
+.msp-tree-icon { color: var(--text-muted); font-size: 10px; flex-shrink: 0; }
+.msp-tree-row.msp-has-rule .msp-tree-icon { color: var(--primary); }
+.msp-tree-name { flex: 1; color: var(--text-color); }
+.msp-tree-row.msp-has-rule .msp-tree-name { font-weight: 600; }
+.msp-rule-badge { font-size: 10px; font-weight: 700; padding: 1px 8px; border-radius: 10px; background: rgba(99,102,241,0.12); color: var(--primary); white-space: nowrap; }
+.msp-tree-empty { padding: 16px; text-align: center; color: var(--text-muted); font-size: 12px; }
+.msp-tree-row.msp-ancestor { opacity: 0.65; }
+.msp-tree-row.msp-ancestor .msp-tree-name { font-style: italic; }
+/* Grid indentation icon */
+.msp-grid-icon { color: var(--text-muted); font-size: 10px; margin-right: 5px; flex-shrink: 0; }
+
+/* ── Short link in the PowerPack Short Link form sidebar ── */
+.thinknxg-short-url { font-size: var(--text-sm); align-items: center; }
+.thinknxg-short-url a { color: var(--text-muted); }
+.thinknxg-short-url a:hover { color: var(--text-color); }
+.thinknxg-short-url .thinknxg-short-url-copy { cursor: copy; flex-shrink: 0; }
+.thinknxg-short-url .icon { vertical-align: text-bottom; }
+
+/* Customer snapshot icon + dialog */
+.pp-customer-info {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  vertical-align: middle;
+  cursor: pointer;
+  color: var(--text-muted);
+  transition: color .1s;
+}
+.pp-customer-info:hover { color: var(--text-color); }
+.pp-customer-info.is-amber { color: var(--orange-500, #f97316); }
+.pp-customer-info.is-red { color: var(--red-500); }
+
+.pp-snap .pp-snap-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 14px; }
+.pp-snap .pp-snap-card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 10px 12px; min-width: 0; }
+.pp-snap .pp-snap-label { font-size: 10px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 4px; white-space: nowrap; }
+.pp-snap .pp-snap-value { font-size: 14px; font-weight: 700; }
+.pp-snap .pp-snap-section { font-size: 10px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin: 14px 0 6px; }
+.pp-snap .pp-snap-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.pp-snap .pp-snap-table th, .pp-snap .pp-snap-table td { padding: 3px 8px; border-bottom: 1px solid var(--border-color); }
+.pp-snap .pp-snap-table th { color: var(--text-muted); background: var(--subtle-fg); text-align: left; }
+.pp-snap .pp-snap-table .r { text-align: right; }
+.pp-snap .pp-snap-table .pp-strong { font-weight: 700; }
+.pp-snap .pp-snap-table .pp-overdue { color: var(--red); font-weight: 700; }
+.pp-snap .pp-snap-contact { font-size: 12px; }
+@media (max-width: 640px) { .pp-snap .pp-snap-cards { grid-template-columns: repeat(2, 1fr); } }
+
+/* Withholding rules sharing an item or supplier (PowerPack Settings) */
+/* The cells too: frappe paints each one with `.grid-body .grid-static-col { background-color: var(--fg-color) }`. */
+.grid-row.pp-wht-dup .data-row, .grid-row.pp-wht-dup .data-row > .col { background-color: var(--bg-yellow); }

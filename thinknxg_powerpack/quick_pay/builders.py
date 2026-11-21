@@ -1,0 +1,158 @@
+"""Payment Entry and Sales Invoice builders for Quick Pay.
+
+Both builders return *unsaved* documents — caller decides when to insert/submit.
+This makes test isolation easier and lets the API layer wrap insert/submit
+inside its idempotency / pre-flight logic.
+"""
+
+from __future__ import annotations
+
+import frappe
+from erpnext.accounts.party import get_party_account
+from erpnext.selling.doctype.sales_order.sales_order import make_sales_invoice
+from frappe.utils import flt, nowdate
+
+from thinknxg_powerpack.quick_pay.validators import (
+	cap_allocation,
+	compute_outstanding,
+	effective_total,
+)
+
+
+def resolve_payment_accounts(company: str, customer: str, mode_of_payment: str) -> dict:
+	"""Resolve the account + currency fields a Payment Entry needs.
+
+	These depend only on (company, customer, mode_of_payment), so a caller
+	building many PEs with the same triple (e.g. the Mpesa loop) can resolve
+	once and pass the result to `build_payment_entry(..., accounts=...)` instead
+	of repeating these single-row lookups on every iteration.
+	"""
+	paid_to = frappe.db.get_value(
+		"Mode of Payment Account",
+		{"parent": mode_of_payment, "company": company},
+		"default_account",
+	)
+	if not paid_to:
+		frappe.throw(f"No account for Mode of Payment {mode_of_payment} in {company}")
+
+	paid_from = get_party_account("Customer", customer, company)
+
+	company_currency = frappe.db.get_value("Company", company, "default_currency")
+	return {
+		"paid_to": paid_to,
+		"paid_from": paid_from,
+		"paid_to_currency": frappe.db.get_value("Account", paid_to, "account_currency") or company_currency,
+		"paid_from_currency": frappe.db.get_value("Account", paid_from, "account_currency") or company_currency,
+	}
+
+
+def build_payment_entry(
+	so_doc,
+	amount: float,
+	mode_of_payment: str,
+	reference_no: str | None = None,
+	remarks: str | None = None,
+	*,
+	full_received_amount: float | None = None,
+	accounts: dict | None = None,
+):
+	"""Build (but don't save) a Payment Entry against a Sales Order.
+
+	`amount` is what to allocate to the SO. `full_received_amount` (Mpesa-only)
+	is the total received when it exceeds the SO outstanding — the PE records
+	the full amount but only allocates `amount` to this SO. If None, defaults
+	to `amount` (cash/bank/card path).
+
+	`accounts` (optional) is a pre-resolved dict from `resolve_payment_accounts`;
+	when omitted the lookups run inline (unchanged single-PE behaviour).
+	"""
+	company = so_doc.company
+	customer = so_doc.customer
+
+	if full_received_amount is None:
+		full_received_amount = amount
+
+	if accounts is None:
+		accounts = resolve_payment_accounts(company, customer, mode_of_payment)
+	paid_to = accounts["paid_to"]
+	paid_from = accounts["paid_from"]
+	paid_to_currency = accounts["paid_to_currency"]
+	paid_from_currency = accounts["paid_from_currency"]
+
+	precision = so_doc.precision("grand_total")
+	total = effective_total(so_doc)
+	outstanding = compute_outstanding(total, so_doc.advance_paid, precision)
+	allocated = cap_allocation(amount, outstanding, precision)
+
+	pe = frappe.new_doc("Payment Entry")
+	pe.payment_type = "Receive"
+	pe.mode_of_payment = mode_of_payment
+	pe.party_type = "Customer"
+	pe.party = customer
+	pe.party_name = so_doc.customer_name or customer
+	pe.company = company
+	pe.posting_date = nowdate()
+	pe.paid_from = paid_from
+	pe.paid_to = paid_to
+	pe.paid_from_account_currency = paid_from_currency
+	pe.paid_to_account_currency = paid_to_currency
+	pe.paid_amount = flt(full_received_amount, precision)
+	pe.received_amount = flt(full_received_amount, precision)
+	pe.reference_no = reference_no or so_doc.name
+	pe.reference_date = nowdate()
+	pe.remarks = remarks or f"Payment for {so_doc.name}"
+
+	pe.append(
+		"references",
+		{
+			"reference_doctype": "Sales Order",
+			"reference_name": so_doc.name,
+			"due_date": so_doc.delivery_date or nowdate(),
+			"total_amount": flt(total, precision),
+			"outstanding_amount": outstanding,
+			"allocated_amount": allocated,
+		},
+	)
+
+	return pe
+
+
+def build_sales_invoice(so_doc, *, update_stock: int = 1):
+	"""Build (but don't save) a Sales Invoice from a Sales Order using the
+	official thinkNXG ERP mapper. Caller is responsible for insert/submit.
+	"""
+	si = make_sales_invoice(so_doc.name)
+	si.update_stock = 1 if update_stock else 0
+	si.allocate_advances_automatically = 1
+	# Pre-populate advances so validate_advance_entries (which runs before
+	# set_advances in thinkNXG ERP's validate sequence) doesn't fire a spurious
+	# "check if it should be pulled as advance" warning for PEs already
+	# allocated to the SO.
+	si.set_advances()
+	return si
+
+
+def sync_so_party_fields(si_doc, so_doc) -> None:
+	"""Restore SO's tax_id / customer_name into the SI right after insert.
+
+	thinkNXG ERP's set_missing_values → get_party_details resets these two fields
+	from the Customer master during every validate() call (which runs inside
+	both insert and submit).  Any values deliberately set on the SO by a
+	"Before Submit" server script (e.g. copying custom_pin_cash → tax_id) are
+	therefore lost before the SI ever hits the database.
+
+	Site-level "Before Submit" scripts on Sales Invoice will re-apply the same
+	logic from the SI's own custom fields when the invoice is eventually
+	submitted, so the submitted copy stays correct.  This function ensures the
+	*draft* SI also reflects the SO's intent immediately after Quick Pay
+	creates it, without waiting for submission.
+	"""
+	updates: dict = {}
+	if so_doc.tax_id and so_doc.tax_id != (si_doc.tax_id or ""):
+		updates["tax_id"] = so_doc.tax_id
+		si_doc.tax_id = so_doc.tax_id
+	if so_doc.customer_name and so_doc.customer_name != (si_doc.customer_name or ""):
+		updates["customer_name"] = so_doc.customer_name
+		si_doc.customer_name = so_doc.customer_name
+	if updates:
+		frappe.db.set_value("Sales Invoice", si_doc.name, updates, update_modified=False)

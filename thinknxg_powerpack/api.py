@@ -1,0 +1,2205 @@
+# Copyright (c) 2026, thinkNXG and contributors
+# For license information, please see license.txt
+
+"""
+API Module for thinkNXG PowerPack
+
+Whitelisted methods accessible via:
+- frappe.call() from JavaScript
+- REST API: /api/method/thinknxg_powerpack.api.<method_name>
+"""
+
+import frappe
+from frappe import _
+
+
+@frappe.whitelist()
+def get_settings_for_client() -> dict:
+    # Singleton load that bypasses User Permissions. The child table company_borders
+    # can reference companies a given user lacks access to, which would otherwise
+    # abort the load and break every PowerPack feature gated by Settings.get.
+    data = frappe.get_doc("PowerPack Settings", "PowerPack Settings").as_dict()
+
+    # Restrict company_borders to companies this user is permitted to see, so a
+    # single-company user never receives another company's accent config. Reading
+    # User Permissions only inspects them (never enforces), so an inaccessible
+    # company cannot raise here.
+    perms = frappe.permissions.get_user_permissions(frappe.session.user)
+    company_perms = perms.get("Company")  # falsy => unrestricted (admin / no User Permission)
+    if company_perms:
+        allowed = {p.get("doc") for p in company_perms}
+        data["company_borders"] = [
+            r for r in (data.get("company_borders") or []) if r.get("company") in allowed
+        ]
+
+    return data
+
+
+@frappe.whitelist()
+def get_system_health() -> dict:
+    """
+    Get system health status and statistics.
+
+    Returns:
+        dict: System health information
+    """
+    return {
+        "status": "healthy",
+        "timestamp": frappe.utils.now(),
+        "user": frappe.session.user
+    }
+
+
+@frappe.whitelist()
+def debug_powerpack_settings() -> dict:
+    """
+    Debug endpoint to check PowerPack Settings.
+
+    Returns:
+        dict: Debug information
+    """
+    from thinknxg_powerpack.utils import get_powerpack_settings, is_feature_enabled
+
+    try:
+        settings = get_powerpack_settings()
+        return {
+            "success": True,
+            "settings": settings,
+            "enable_quotation_powerup_value": settings.get('enable_quotation_powerup'),
+            "enable_quotation_powerup_type": str(type(settings.get('enable_quotation_powerup'))),
+            "is_quotation_powerup_enabled": is_feature_enabled('enable_quotation_powerup')
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "traceback": frappe.get_traceback()
+        }
+
+
+@frappe.whitelist()
+def run_custom_report(report_name: str, filters: dict = None) -> list:
+    """
+    Run a custom report with given filters.
+
+    Args:
+        report_name: Name of the report
+        filters: Report filters
+
+    Returns:
+        list: Report data
+    """
+    if not frappe.has_permission("Report", "read"):
+        frappe.throw(_("Not permitted"), frappe.PermissionError)
+
+    # TODO: Implement custom report logic
+    return []
+
+
+@frappe.whitelist()
+def fetch_item_prices(item_codes_str: str, buying_price_list: str, selling_price_list: str) -> list:
+    """
+    Fetch item prices for bulk price editor.
+
+    Args:
+        item_codes_str: Pipe-delimited string of item codes (e.g., "ITEM001|||ITEM002|||ITEM003")
+        buying_price_list: Name of the buying price list
+        selling_price_list: Name of the selling price list
+
+    Returns:
+        list: List of dictionaries containing item code, name, cost price, and sell price
+    """
+    if not item_codes_str or not buying_price_list or not selling_price_list:
+        return []
+
+    # Split item codes
+    item_codes = item_codes_str.split('|||')
+
+    results = []
+    for item_code in item_codes:
+        if not item_code:
+            continue
+
+        # Get item details
+        item = frappe.get_cached_value('Item', item_code, ['item_code', 'item_name'], as_dict=True)
+        if not item:
+            continue
+
+        # Get buying price (cost)
+        cost_price = frappe.db.get_value(
+            'Item Price',
+            {
+                'item_code': item_code,
+                'price_list': buying_price_list
+            },
+            'price_list_rate'
+        ) or 0
+
+        # Get selling price
+        sell_price = frappe.db.get_value(
+            'Item Price',
+            {
+                'item_code': item_code,
+                'price_list': selling_price_list
+            },
+            'price_list_rate'
+        ) or 0
+
+        results.append({
+            'item_code': item.get('item_code'),
+            'item_name': item.get('item_name'),
+            'cost_price': cost_price,
+            'sell_price': sell_price
+        })
+
+    return results
+
+
+@frappe.whitelist()
+def save_item_prices(items_str: str, selling_price_list: str) -> dict:
+    """
+    Save bulk updated item prices.
+
+    Args:
+        items_str: Pipe-delimited string of "item_code::price" pairs (e.g., "ITEM001::100.50|||ITEM002::200.00")
+        selling_price_list: Name of the selling price list
+
+    Returns:
+        dict: Contains updated_count
+    """
+    if not items_str or not selling_price_list:
+        frappe.throw(_("Missing required parameters"))
+
+    # Split items
+    items_data = items_str.split('|||')
+    updated_count = 0
+
+    for item_data in items_data:
+        if not item_data or '::' not in item_data:
+            continue
+
+        try:
+            item_code, price = item_data.split('::', 1)
+            price = float(price)
+
+            # Check if Item Price exists
+            existing_price = frappe.db.exists(
+                'Item Price',
+                {
+                    'item_code': item_code,
+                    'price_list': selling_price_list
+                }
+            )
+
+            if existing_price:
+                # Update existing
+                doc = frappe.get_doc('Item Price', existing_price)
+                doc.price_list_rate = price
+                doc.save(ignore_permissions=False)
+            else:
+                # Create new
+                doc = frappe.get_doc({
+                    'doctype': 'Item Price',
+                    'item_code': item_code,
+                    'price_list': selling_price_list,
+                    'price_list_rate': price
+                })
+                doc.insert(ignore_permissions=False)
+
+            updated_count += 1
+
+        except Exception as e:
+            frappe.log_error(f"Error updating price for {item_code}: {str(e)}", "Bulk Price Update Error")
+            continue
+
+    frappe.db.commit()
+
+    return {
+        'updated_count': updated_count
+    }
+
+
+@frappe.whitelist()
+def check_duplicate_tax_id(doctype: str, tax_id: str, current_name: str = None) -> dict:
+    """
+    Check if a tax ID exists more than twice in Customer or Supplier records.
+
+    Args:
+        doctype: Either 'Customer' or 'Supplier'
+        tax_id: The tax ID to check
+        current_name: Current document name (to exclude from duplicates)
+
+    Returns:
+        dict: Contains 'has_duplicates' (bool) and 'duplicates' (list)
+    """
+    if not tax_id or doctype not in ['Customer', 'Supplier']:
+        return {"has_duplicates": False, "duplicates": []}
+
+    # Build filters
+    filters = [
+        [doctype, 'tax_id', '=', tax_id]
+    ]
+
+    # Exclude current document if editing
+    if current_name:
+        filters.append([doctype, 'name', '!=', current_name])
+
+    # Get all records with the same tax_id
+    duplicates = frappe.get_all(
+        doctype,
+        filters=filters,
+        fields=['name', 'customer_name' if doctype == 'Customer' else 'supplier_name', 'creation'],
+        order_by='creation desc'
+    )
+
+    # Format the results
+    formatted_duplicates = []
+    for dup in duplicates:
+        formatted_duplicates.append({
+            'name': dup.get('name'),
+            'display_name': dup.get('customer_name') if doctype == 'Customer' else dup.get('supplier_name'),
+            'creation': dup.get('creation')
+        })
+
+    # Check if tax_id exists more than twice (including current document)
+    # If current_name is provided, duplicates count + 1 (current) > 2
+    # If new document, duplicates count >= 2
+    total_count = len(duplicates) + (1 if current_name else 1)
+    has_duplicates = total_count > 1
+
+    return {
+        "has_duplicates": has_duplicates,
+        "duplicates": formatted_duplicates,
+        "total_count": total_count
+    }
+
+
+@frappe.whitelist()
+def get_customer_snapshot(customer: str, company: str = None) -> dict:
+    """Outstanding, overdue, open payments, credit limit and contact for one customer.
+
+    Feeds the (i) dialog next to Customer on sales documents. Empty when the
+    Enable Warnings switch is off or no customer is given.
+    """
+    from thinknxg_powerpack.customer_snapshot import build_customer_snapshot, check_snapshot_access
+    from thinknxg_powerpack.utils import is_feature_enabled
+
+    if not is_feature_enabled("enable_warnings") or not customer:
+        return {}
+    frappe.has_permission("Sales Invoice", "read", throw=True)
+    check_snapshot_access(customer, company)
+    return build_customer_snapshot(customer, company)
+
+
+
+# The site's Client Script that formats the customer statement (Copy, Email, Copy as Image
+# in the Customer Info dialog). thinkNXG Reports seeds it and its Transaction History
+# uses the same one; PowerPack only reads it, so it works without that app installed.
+PARTY_STATEMENT_SCRIPT = "Party Statement - Copy and Email"
+
+
+@frappe.whitelist()
+def get_party_statement_script() -> str | None:
+    """Source of the site's statement script, or None when it is missing or disabled."""
+    frappe.has_permission("Sales Invoice", "read", throw=True)
+    return frappe.db.get_value("Client Script", {"name": PARTY_STATEMENT_SCRIPT, "enabled": 1}, "script")
+
+# Mirrors has_cost_permission() in bulk_selection.js, which decides whether the dialog
+# shows a cost column. Enforced here too so the value never reaches a user the dialog
+# would hide it from; the browser check alone let anyone read it off the endpoint.
+BULK_COST_ROLES = {"System Manager", "Stock Manager", "Accounts Manager", "Sales Master Manager", "Administrator", "Cost Viewer"}
+
+
+def _can_read_item_cost() -> bool:
+    """False when the site hides Item.valuation_rate behind a permlevel this user cannot read.
+
+    A site restricts cost by moving valuation_rate to permlevel 1 and granting that level
+    only to the people who may see it; on a site that never did, the field sits at
+    permlevel 0 and this is always True, so the role checks alone decide, as before.
+    """
+    if frappe.session.user == "Administrator":
+        return True
+    meta = frappe.get_meta("Item")
+    level = meta.get_field("valuation_rate").permlevel or 0
+    return not level or level in meta.get_permlevel_access("read")
+
+
+@frappe.whitelist()
+def get_bulk_item_details(items, price_list: str, warehouse: str = None, customer: str = None,
+                          tax_category: str = None, taxes_and_charges: str = None,
+                          optimized: bool = True, doctype: str = 'Sales Order') -> dict:
+    """
+    Get bulk item details for bulk selection in sales and purchase documents.
+
+    Args:
+        items: List of item codes (or pipe-delimited string)
+        price_list: Price list name (selling or buying depending on doctype)
+        warehouse: Warehouse name (optional for Quotation/Purchase Order)
+        customer: Customer name (optional, sales docs only)
+        tax_category: Tax category (optional, will be fetched from customer if not provided)
+        taxes_and_charges: Tax template name (for included_in_print_rate calculation)
+        optimized: Use optimized batch queries (default: True)
+        doctype: DocType name (Sales Order, Sales Invoice, Quotation, Purchase Order)
+
+    Returns:
+        dict: Contains 'items' (list), 'total_items' (int), 'tax_category' (str), 'tax_rate' (float)
+    """
+    from thinknxg_powerpack.utils import is_feature_enabled
+
+    # Check if feature is enabled based on doctype
+    feature_map = {
+        'Sales Order': 'enable_sales_order_bulk_selection',
+        'Sales Invoice': 'enable_sales_invoice_bulk_selection',
+        'Quotation': 'enable_quotation_bulk_selection',
+        'Purchase Order': 'enable_purchase_order_bulk_selection'
+    }
+
+    feature_name = feature_map.get(doctype)
+    if not feature_name or not is_feature_enabled(feature_name):
+        frappe.throw(_("Bulk Selection feature is not enabled for {0} in PowerPack Settings").format(doctype))
+    frappe.has_permission(doctype, "read", throw=True)
+
+    # Parse items input
+    if isinstance(items, str):
+        items = items.strip()
+        if items.startswith('[') and items.endswith(']'):
+            items = items[1:-1]
+        if not items:
+            items = []
+        else:
+            items = [item.strip().strip('"').strip("'").strip()
+                    for item in items.split(',') if item.strip()]
+    elif not isinstance(items, list):
+        items = []
+
+    if not items:
+        frappe.throw(_("No items provided"))
+
+    if not price_list:
+        frappe.throw(_("Price List is required"))
+
+    # Warehouse is optional for Quotation
+    if warehouse and not frappe.db.exists('Warehouse', warehouse):
+        frappe.throw(_("Warehouse {0} does not exist").format(warehouse))
+
+    if not frappe.db.exists('Price List', price_list):
+        frappe.throw(_("Price List {0} does not exist").format(price_list))
+
+    # Get tax category from customer if not provided
+    if not tax_category and customer:
+        tax_category = frappe.db.get_value('Customer', customer, 'tax_category')
+
+    # Purchase Order reads buying prices, purchase items and a purchase tax template
+    buying = doctype == 'Purchase Order'
+
+    # Calculate tax rate for included_in_print_rate taxes
+    tax_rate = 0.0
+    if taxes_and_charges:
+        tax_rate = _get_included_tax_rate(taxes_and_charges, buying)
+
+    # Convert string 'true'/'false' to boolean
+    if isinstance(optimized, str):
+        optimized = optimized.lower() == 'true'
+
+    try:
+        if optimized:
+            # Optimized batch fetch
+            result = _get_bulk_items_optimized(items, price_list, warehouse, tax_category, tax_rate, buying)
+        else:
+            # Standard iteration
+            result = _get_bulk_items_standard(items, price_list, warehouse, tax_category, tax_rate, buying)
+
+        result['tax_category'] = tax_category or ''
+        result['tax_rate'] = tax_rate
+        if not (BULK_COST_ROLES & set(frappe.get_roles()) and _can_read_item_cost()):
+            for row in result.get('items') or []:
+                row['valuation_rate'] = None
+        return result
+
+    except Exception as e:
+        frappe.log_error(
+            message=str(e),
+            title="Bulk Item Details Critical Error"
+        )
+        frappe.throw(_("Error loading item details: {0}").format(str(e)))
+
+
+def _get_included_tax_rate(taxes_and_charges, buying=False):
+    """
+    Calculate total tax rate for taxes with included_in_print_rate=1
+
+    Args:
+        taxes_and_charges: Tax template name (Purchase Taxes and Charges Template if
+            buying, else Sales Taxes and Charges Template)
+
+    Returns:
+        float: Total tax percentage
+    """
+    if not taxes_and_charges:
+        return 0.0
+
+    try:
+        # Get the tax template
+        template_doctype = 'Purchase Taxes and Charges Template' if buying else 'Sales Taxes and Charges Template'
+        tax_template = frappe.get_cached_doc(template_doctype, taxes_and_charges)
+
+        total_tax_rate = 0.0
+        for tax in tax_template.taxes:
+            # Only include taxes with included_in_print_rate=1
+            if tax.included_in_print_rate:
+                total_tax_rate += (tax.rate or 0)
+
+        return total_tax_rate
+
+    except Exception as e:
+        frappe.log_error(
+            message=f"Error calculating tax rate for {taxes_and_charges}: {str(e)}",
+            title="Tax Rate Calculation Error"
+        )
+        return 0.0
+
+
+def _get_bulk_items_optimized(items, price_list, warehouse, tax_category, tax_rate=0.0, buying=False):
+    """Optimized batch fetch for bulk items"""
+    # Batch fetch all items at once
+    item_docs = frappe.db.get_all(
+        'Item',
+        filters={
+            'name': ['in', items],
+            'disabled': 0,
+            'is_purchase_item' if buying else 'is_sales_item': 1
+        },
+        fields=['name', 'item_name', 'description', 'stock_uom', 'image', 'valuation_rate', 'is_stock_item']
+    )
+
+    if not item_docs:
+        return {'items': [], 'total_items': 0}
+
+    item_codes = [item['name'] for item in item_docs]
+
+    # Batch fetch prices
+    prices = {}
+    price_data = frappe.db.get_all(
+        'Item Price',
+        filters={
+            'item_code': ['in', item_codes],
+            'price_list': price_list,
+            'buying' if buying else 'selling': 1
+        },
+        fields=['item_code', 'price_list_rate']
+    )
+    for p in price_data:
+        prices[p['item_code']] = p['price_list_rate']
+
+    # Batch fetch stock and valuation from Bin
+    stock = {}
+    bin_valuation = {}
+    if warehouse:
+        bin_data = frappe.db.get_all(
+            'Bin',
+            filters={
+                'item_code': ['in', item_codes],
+                'warehouse': warehouse
+            },
+            fields=['item_code', 'actual_qty', 'valuation_rate']
+        )
+        for b in bin_data:
+            stock[b['item_code']] = b['actual_qty']
+            if b.get('valuation_rate'):
+                bin_valuation[b['item_code']] = b['valuation_rate']
+
+    # Batch fetch item tax templates
+    item_taxes_map = {}
+    tax_data = frappe.db.get_all(
+        'Item Tax',
+        filters={
+            'parent': ['in', item_codes],
+            'parenttype': 'Item'
+        },
+        fields=['parent', 'item_tax_template', 'tax_category'],
+        order_by='idx'
+    )
+    for t in tax_data:
+        if t['parent'] not in item_taxes_map:
+            item_taxes_map[t['parent']] = []
+        item_taxes_map[t['parent']].append({
+            'item_tax_template': t['item_tax_template'],
+            'tax_category': t['tax_category']
+        })
+
+    # Combine all data
+    result = []
+    for item in item_docs:
+        item_code = item['name']
+        item_tax_template = _get_item_tax_template_for_category(
+            item_code,
+            tax_category,
+            item_taxes_map
+        )
+
+        # Use bin valuation if available, otherwise item valuation
+        valuation = bin_valuation.get(item_code) or item.get('valuation_rate', 0) or 0
+
+        # Get price_list_rate (may include tax if tax_inclusive)
+        price_list_rate = float(prices.get(item_code, 0))
+
+        # Calculate net_rate (tax-exclusive rate) if taxes are included in print rate
+        net_rate = price_list_rate
+        if tax_rate > 0 and price_list_rate > 0:
+            # net_rate = price_list_rate / (1 + tax_rate%)
+            net_rate = price_list_rate / (1 + tax_rate / 100)
+
+        result.append({
+            'item_code': item_code,
+            'item_name': item.get('item_name') or item_code,
+            'description': item.get('description') or item.get('item_name') or item_code,
+            'stock_uom': item.get('stock_uom') or 'Nos',
+            'image': _get_item_image_url(item.get('image')),
+            'valuation_rate': float(valuation),
+            'price_list_rate': price_list_rate,
+            'net_rate': float(net_rate),
+            'actual_qty': float(stock.get(item_code, 0)),
+            'item_tax_template': item_tax_template or '',
+            'is_stock_item': item.get('is_stock_item', 1)
+        })
+
+    result.sort(key=lambda x: x['item_code'])
+
+    return {
+        'items': result,
+        'total_items': len(result)
+    }
+
+
+def _get_bulk_items_standard(items, price_list, warehouse, tax_category, tax_rate=0.0, buying=False):
+    """Standard iteration for bulk items"""
+    result = []
+
+    for item_code in items:
+        if not item_code:
+            continue
+
+        if not frappe.db.exists('Item', item_code):
+            continue
+
+        try:
+            item_doc = frappe.get_cached_doc('Item', item_code)
+
+            if item_doc.disabled or not (item_doc.is_purchase_item if buying else item_doc.is_sales_item):
+                continue
+
+            # Get valuation - prefer bin valuation for the warehouse
+            valuation_rate = _get_valuation_rate(item_code, warehouse)
+            price_list_rate = _get_item_price(item_code, price_list, buying)
+            actual_qty = _get_stock_qty(item_code, warehouse) if warehouse else 0
+
+            # Calculate net_rate (tax-exclusive rate) if taxes are included in print rate
+            net_rate = price_list_rate
+            if tax_rate > 0 and price_list_rate > 0:
+                # net_rate = price_list_rate / (1 + tax_rate%)
+                net_rate = price_list_rate / (1 + tax_rate / 100)
+
+            # Get item tax template
+            item_tax_template = None
+            if item_doc.taxes:
+                if tax_category:
+                    for tax in item_doc.taxes:
+                        if tax.tax_category == tax_category:
+                            item_tax_template = tax.item_tax_template
+                            break
+
+                if not item_tax_template:
+                    for tax in item_doc.taxes:
+                        if not tax.tax_category:
+                            item_tax_template = tax.item_tax_template
+                            break
+
+                if not item_tax_template and item_doc.taxes:
+                    item_tax_template = item_doc.taxes[0].item_tax_template
+
+            result.append({
+                'item_code': item_code,
+                'item_name': item_doc.item_name or item_code,
+                'description': item_doc.description or item_doc.item_name or item_code,
+                'stock_uom': item_doc.stock_uom or 'Nos',
+                'image': _get_item_image_url(item_doc.image),
+                'valuation_rate': float(valuation_rate),
+                'price_list_rate': float(price_list_rate),
+                'net_rate': float(net_rate),
+                'actual_qty': float(actual_qty),
+                'item_tax_template': item_tax_template or '',
+                'is_stock_item': item_doc.is_stock_item
+            })
+
+        except Exception as e:
+            frappe.log_error(
+                message=f"Error fetching details for {item_code}: {str(e)}",
+                title="Bulk Item Details Error"
+            )
+            continue
+
+    result.sort(key=lambda x: x.get('item_code', ''))
+
+    return {
+        'items': result,
+        'total_items': len(result)
+    }
+
+
+def _get_item_image_url(image):
+    """Helper to get valid image URL"""
+    if not image:
+        return None
+
+    if image.startswith(('http://', 'https://', '/files/')):
+        return image
+
+    return None
+
+
+def _get_valuation_rate(item_code, warehouse=None):
+    """Get valuation rate - try warehouse-specific first, then item default"""
+    # Try warehouse-specific valuation first
+    if warehouse:
+        rate = frappe.db.get_value(
+            'Bin',
+            {
+                'item_code': item_code,
+                'warehouse': warehouse
+            },
+            'valuation_rate'
+        )
+        if rate:
+            return rate
+
+    # Fall back to item's valuation rate
+    try:
+        rate = frappe.db.get_value('Item', item_code, 'valuation_rate')
+        return rate if rate else 0
+    except (frappe.DoesNotExistError, AttributeError, TypeError):
+        return 0
+
+
+def _get_item_price(item_code, price_list, buying=False):
+    """Get item price with error handling"""
+    try:
+        price = frappe.db.get_value(
+            'Item Price',
+            {
+                'item_code': item_code,
+                'price_list': price_list,
+                'buying' if buying else 'selling': 1
+            },
+            'price_list_rate'
+        )
+        return price if price else 0
+    except (frappe.DoesNotExistError, AttributeError, TypeError):
+        return 0
+
+
+def _get_stock_qty(item_code, warehouse):
+    """Get stock quantity with error handling"""
+    if not warehouse:
+        return 0
+
+    try:
+        qty = frappe.db.get_value(
+            'Bin',
+            {
+                'item_code': item_code,
+                'warehouse': warehouse
+            },
+            'actual_qty'
+        )
+        return qty if qty else 0
+    except (frappe.DoesNotExistError, AttributeError, TypeError):
+        return 0
+
+
+def _get_item_tax_template_for_category(item_code, tax_category, item_taxes_map):
+    """
+    Get the appropriate Item Tax Template based on tax category.
+    Returns template matching tax_category, or default (no category) if not found.
+    """
+    templates = item_taxes_map.get(item_code, [])
+
+    if not templates:
+        return None
+
+    # First, try to find exact match for tax category
+    if tax_category:
+        for t in templates:
+            if t.get('tax_category') == tax_category:
+                return t.get('item_tax_template')
+
+    # Fall back to template with no tax category (default)
+    for t in templates:
+        if not t.get('tax_category'):
+            return t.get('item_tax_template')
+
+    # If nothing matches, return first available
+    return templates[0].get('item_tax_template') if templates else None
+
+
+@frappe.whitelist()
+def get_bulk_stock_item_details(items, warehouse: str = None, doctype: str = 'Stock Reconciliation') -> dict:
+    """
+    Get bulk item details for bulk selection in stock documents.
+
+    Args:
+        items: List of item codes (or pipe-delimited string)
+        warehouse: Warehouse name (optional)
+        doctype: DocType name (Stock Reconciliation, Stock Entry)
+
+    Returns:
+        dict: Contains 'items' (list), 'total_items' (int)
+    """
+    from thinknxg_powerpack.utils import is_feature_enabled
+
+    feature_map = {
+        'Stock Reconciliation': 'enable_stock_reconciliation_bulk_selection',
+        'Stock Entry': 'enable_stock_entry_bulk_selection'
+    }
+
+    feature_name = feature_map.get(doctype)
+    if not feature_name or not is_feature_enabled(feature_name):
+        frappe.throw(_("Bulk Selection feature is not enabled for {0} in PowerPack Settings").format(doctype))
+    # Valuation is the whole point of the stock dialog (Stock Reconciliation rows carry it),
+    # so it is not withheld by role; reading the stock doctype is what entitles a user to it,
+    # unless the site restricts Item.valuation_rate to a permlevel the user cannot read.
+    frappe.has_permission(doctype, "read", throw=True)
+    can_read_cost = _can_read_item_cost()
+
+    # Parse items input
+    if isinstance(items, str):
+        items = items.strip()
+        if items.startswith('[') and items.endswith(']'):
+            items = items[1:-1]
+        if not items:
+            items = []
+        else:
+            items = [item.strip().strip('"').strip("'").strip()
+                    for item in items.split(',') if item.strip()]
+    elif not isinstance(items, list):
+        items = []
+
+    if not items:
+        frappe.throw(_("No items provided"))
+
+    if warehouse and not frappe.db.exists('Warehouse', warehouse):
+        frappe.throw(_("Warehouse {0} does not exist").format(warehouse))
+
+    # Batch fetch all stock items
+    item_docs = frappe.db.get_all(
+        'Item',
+        filters={
+            'name': ['in', items],
+            'disabled': 0,
+            'is_stock_item': 1
+        },
+        fields=['name', 'item_name', 'description', 'stock_uom', 'image', 'valuation_rate']
+    )
+
+    if not item_docs:
+        return {'items': [], 'total_items': 0}
+
+    item_codes = [item['name'] for item in item_docs]
+
+    # Batch fetch stock and valuation from Bin
+    stock = {}
+    bin_valuation = {}
+    if warehouse:
+        bin_data = frappe.db.get_all(
+            'Bin',
+            filters={
+                'item_code': ['in', item_codes],
+                'warehouse': warehouse
+            },
+            fields=['item_code', 'actual_qty', 'valuation_rate']
+        )
+        for b in bin_data:
+            stock[b['item_code']] = b['actual_qty']
+            if b.get('valuation_rate'):
+                bin_valuation[b['item_code']] = b['valuation_rate']
+    else:
+        # Get total stock across all warehouses
+        bin_data = frappe.db.sql("""
+            SELECT item_code, SUM(actual_qty) as actual_qty, AVG(valuation_rate) as valuation_rate
+            FROM `tabBin`
+            WHERE item_code IN %s
+            GROUP BY item_code
+        """, [item_codes], as_dict=True)
+        for b in bin_data:
+            stock[b['item_code']] = b['actual_qty']
+            if b.get('valuation_rate'):
+                bin_valuation[b['item_code']] = b['valuation_rate']
+
+    result = []
+    for item in item_docs:
+        item_code = item['name']
+        valuation = bin_valuation.get(item_code) or item.get('valuation_rate', 0) or 0
+
+        result.append({
+            'item_code': item_code,
+            'item_name': item.get('item_name') or item_code,
+            'description': item.get('description') or item.get('item_name') or item_code,
+            'stock_uom': item.get('stock_uom') or 'Nos',
+            'image': _get_item_image_url(item.get('image')),
+            'valuation_rate': float(valuation) if can_read_cost else None,
+            'actual_qty': float(stock.get(item_code, 0))
+        })
+
+    result.sort(key=lambda x: x['item_code'])
+
+    return {
+        'items': result,
+        'total_items': len(result)
+    }
+
+
+@frappe.whitelist()
+def zero_allocate_entries(doc, payments, invoices):
+    """
+    Create zero-amount allocation entries for selected payments and invoices.
+
+    This is the "Zero Allocate" PowerUp for Payment Reconciliation that allows
+    users to manually distribute large payments across multiple invoices without
+    the FIFO limitation of the standard "Allocate" button.
+
+    Args:
+        doc: Payment Reconciliation document (dict or JSON string)
+        payments: Selected payment entries (list or JSON string)
+        invoices: Selected invoice entries (list or JSON string)
+
+    Returns:
+        list: Allocation entries with allocated_amount = 0
+    """
+    from thinknxg_powerpack.utils import is_feature_enabled
+    import json
+
+    try:
+        # Check if feature is enabled
+        if not is_feature_enabled('enable_payment_reconciliation_powerup'):
+            frappe.throw(_("Zero Allocate feature is not enabled in PowerPack Settings"))
+
+        # Parse JSON inputs if needed
+        if isinstance(doc, str):
+            doc = json.loads(doc)
+        if isinstance(payments, str):
+            payments = json.loads(payments)
+        if isinstance(invoices, str):
+            invoices = json.loads(invoices)
+
+        # Validate inputs
+        if not doc:
+            frappe.throw(_("Payment Reconciliation document is required"))
+
+        if not payments or not isinstance(payments, list) or len(payments) == 0:
+            frappe.throw(_("Please select at least one payment"))
+
+        if not invoices or not isinstance(invoices, list) or len(invoices) == 0:
+            frappe.throw(_("Please select at least one invoice"))
+
+    except Exception as e:
+        frappe.log_error(
+            message=f"Error in zero_allocate_entries validation: {str(e)}",
+            title="Zero Allocate Validation Error"
+        )
+        frappe.throw(_("Error validating inputs: {0}").format(str(e)))
+
+    try:
+        # Get exchange rate map for multi-currency support
+        invoice_exchange_map = get_invoice_exchange_map_for_zero_allocate(doc, invoices)
+
+        # Get Accounts Settings for exchange gain/loss account
+        accounts_settings = frappe.get_cached_doc("Accounts Settings")
+
+        allocations = []
+
+        # Create allocation entries for each payment × invoice combination
+        for payment in payments:
+            for invoice in invoices:
+                # Note: invoices table uses invoice_type/invoice_number
+                # but allocation table also uses invoice_type/invoice_number
+                invoice_type = invoice.get("invoice_type")
+                invoice_number = invoice.get("invoice_number")
+
+                if not invoice_type or not invoice_number:
+                    continue
+
+                # Get exchange rate
+                exchange_rate = invoice_exchange_map.get(invoice_number, {}).get("exchange_rate", 1)
+
+                # Get accounting dimensions
+                dimensions = get_accounting_dimensions_for_doc(
+                    invoice_type,
+                    invoice_number
+                )
+
+                # Create allocation entry with zero amount
+                # Important: Copy tracking fields from payment and invoice to prevent
+                # "Payment Entry has been modified" errors during reconciliation
+                allocation = {
+                    # Payment fields
+                    "reference_type": payment.get("reference_type"),
+                    "reference_name": payment.get("reference_name"),
+                    "reference_row": payment.get("reference_row"),
+                    "is_advance": payment.get("is_advance"),
+                    "amount": payment.get("amount"),  # Original payment amount (for tracking)
+
+                    # Invoice fields
+                    "invoice_type": invoice_type,
+                    "invoice_number": invoice_number,
+                    "unreconciled_amount": invoice.get("outstanding_amount"),  # Track original outstanding
+
+                    # Allocation amount (zero - user will fill manually)
+                    "allocated_amount": 0,
+
+                    # Currency and exchange
+                    "currency": payment.get("currency") or invoice.get("currency"),
+                    "exchange_rate": exchange_rate,
+
+                    # Difference handling
+                    "difference_amount": 0,
+                    "difference_account": accounts_settings.get("gain_loss_account"),
+                    "gain_loss_posting_date": frappe.utils.nowdate(),
+
+                    # Cost center from payment (if available)
+                    "cost_center": payment.get("cost_center")
+                }
+
+                # Add accounting dimensions if present
+                for dimension_field, dimension_value in dimensions.items():
+                    allocation[dimension_field] = dimension_value
+
+                allocations.append(allocation)
+
+        if not allocations:
+            # Log more details for debugging
+            frappe.log_error(
+                message=f"No allocations created.\nPayments count: {len(payments)}\nInvoices count: {len(invoices)}\nPayments: {payments}\nInvoices: {invoices}",
+                title="Zero Allocate - No Allocations Created"
+            )
+            frappe.throw(_("No valid allocations could be created. Please check the Error Log for details."))
+
+        return allocations
+
+    except frappe.exceptions.ValidationError:
+        # Re-raise validation errors without wrapping
+        raise
+    except Exception as e:
+        frappe.log_error(
+            message=f"Error creating zero allocations: {str(e)}\nDoc: {doc}\nPayments: {payments}\nInvoices: {invoices}",
+            title="Zero Allocate Creation Error"
+        )
+        frappe.throw(_("Error creating allocations: {0}").format(str(e)))
+
+
+def get_invoice_exchange_map_for_zero_allocate(doc, invoices):
+    """
+    Get exchange rate mapping for invoices in multi-currency scenarios.
+
+    Args:
+        doc: Payment Reconciliation document
+        invoices: List of invoice entries
+
+    Returns:
+        dict: Map of invoice_number -> {exchange_rate, invoice_currency}
+    """
+    invoice_exchange_map = {}
+
+    # Get company currency
+    company_currency = frappe.get_cached_value("Company", doc.get("company"), "default_currency")
+    party_account_currency = doc.get("party_account_currency") or company_currency
+
+    for invoice in invoices:
+        invoice_type = invoice.get("invoice_type")
+        invoice_number = invoice.get("invoice_number")
+
+        if not invoice_type or not invoice_number:
+            continue
+
+        # Get invoice currency and exchange rate
+        invoice_currency = frappe.db.get_value(invoice_type, invoice_number, "currency")
+
+        if invoice_currency == party_account_currency:
+            exchange_rate = 1
+        else:
+            # Get exchange rate from the invoice document
+            exchange_rate = frappe.db.get_value(invoice_type, invoice_number, "conversion_rate") or 1
+
+        invoice_exchange_map[invoice_number] = {
+            "exchange_rate": exchange_rate,
+            "invoice_currency": invoice_currency
+        }
+
+    return invoice_exchange_map
+
+
+def get_accounting_dimensions_for_doc(doctype, docname):
+    """
+    Get accounting dimensions (cost center, project, etc.) from a document.
+
+    Args:
+        doctype: Document type (e.g., "Sales Invoice", "Purchase Invoice")
+        docname: Document name
+
+    Returns:
+        dict: Accounting dimension fields and values
+    """
+    dimensions = {}
+
+    if not doctype or not docname:
+        return dimensions
+
+    try:
+        # Get accounting dimensions from the system
+        accounting_dimensions = frappe.get_all(
+            "Accounting Dimension",
+            filters={"disabled": 0},
+            fields=["fieldname", "label"]
+        )
+
+        if not accounting_dimensions:
+            return dimensions
+
+        # Get dimension values from the document
+        dimension_fields = [d["fieldname"] for d in accounting_dimensions]
+        doc_data = frappe.db.get_value(doctype, docname, dimension_fields, as_dict=True)
+
+        if doc_data:
+            for field in dimension_fields:
+                value = doc_data.get(field)
+                if value:
+                    dimensions[field] = value
+
+    except Exception as e:
+        # Log error but don't fail - dimensions are optional
+        frappe.log_error(
+            message=f"Error fetching accounting dimensions for {doctype} {docname}: {str(e)}",
+            title="Accounting Dimensions Error"
+        )
+
+    return dimensions
+
+
+@frappe.whitelist()
+def get_document_public_link(doctype, name):
+	"""Return a short public link for a document the caller can read.
+
+	The link opens the document for anyone who has it, without logging in, so it is
+	only handed out for a document the caller could open themselves. Print formats
+	reach the same link through the Jinja method of this name in
+	``thinknxg_powerpack.jinja``, which does not check: a share-key web view renders
+	the print format as Guest.
+	"""
+	doc = frappe.get_doc(doctype, name)
+	doc.check_permission("read")
+	return build_public_link(doc)
+
+
+def build_public_link(doc):
+	"""Return a short public link for ``doc``. No permission check - callers do that.
+
+	Generates (or reuses) a PowerPack Short Link record with a token of the
+	form ``{name}-{4-char-random}`` and returns a URL like:
+	    https://yoursite.com/s/QTN-0001-x7kQ
+	Characters in the name outside ``[A-Za-z0-9._-]`` become ``-``, so a name like
+	``LPO/26/09/00109`` gives ``LPO-26-09-00109-x7kQ``. A reused token is returned as
+	stored - older ones may still contain "/", which the ``<path:token>`` route accepts.
+
+	The short link redirects to the full document URL secured by a share key.
+	Compatible with both v15 (signature-based) and v16+ (DocumentShareKey).
+	On v15 sites, System Settings must have allow_older_web_view_links enabled.
+	"""
+	import random
+	import re
+	import string
+
+	doctype, name = doc.doctype, doc.name
+
+	# Build the full target URL (v15/v16 compatible)
+	if hasattr(doc, "get_document_share_key"):
+		key = doc.get_document_share_key()
+	else:
+		key = doc.get_signature()
+
+	encoded_doctype = doctype.replace(" ", "%20")
+	target_url = f"{frappe.utils.get_url()}/{encoded_doctype}/{name}?key={key}"
+
+	# Reuse an existing short link for this document if one exists
+	existing = frappe.db.get_value(
+		"PowerPack Short Link",
+		{"reference_doctype": doctype, "reference_docname": name},
+		"token",
+	)
+	if existing:
+		return f"{frappe.utils.get_url()}/s/{existing}"
+
+	# Generate a unique 4-char alphanumeric suffix
+	chars = string.ascii_letters + string.digits
+	slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "doc"
+	for _ in range(10):
+		suffix = "".join(random.choices(chars, k=4))
+		token = f"{slug}-{suffix}"
+		if not frappe.db.exists("PowerPack Short Link", token):
+			break
+
+	# Determine expiry from DocumentShareKey if available (v16+)
+	expires_on = None
+	if hasattr(doc, "get_document_share_key"):
+		expires_on = frappe.db.get_value(
+			"Document Share Key",
+			{"reference_doctype": doctype, "reference_docname": name},
+			"expires_on",
+		)
+
+	short_link = frappe.new_doc("PowerPack Short Link")
+	short_link.token = token
+	short_link.target_url = target_url
+	short_link.reference_doctype = doctype
+	short_link.reference_docname = name
+	short_link.expires_on = expires_on
+	short_link.insert(ignore_permissions=True)
+
+	return f"{frappe.utils.get_url()}/s/{token}"
+
+
+@frappe.whitelist(allow_guest=True)
+def get_short_link_target(token):
+	"""Validate a short link token and return the document URL and metadata.
+
+	Used by the thinkNXG Builder Document Viewer component to resolve ?t=<token>
+	without exposing the underlying share key in the page URL.
+	"""
+	if not token:
+		frappe.throw("Invalid token.", frappe.PageDoesNotExistError)
+
+	short_link = frappe.db.get_value(
+		"PowerPack Short Link",
+		token,
+		["target_url", "reference_doctype", "reference_docname", "expires_on"],
+		as_dict=True,
+	)
+
+	if not short_link:
+		frappe.throw("This link does not exist.", frappe.PageDoesNotExistError)
+
+	if short_link.expires_on and str(short_link.expires_on) < frappe.utils.today():
+		frappe.throw("This link has expired.")
+
+	return {
+		"target_url": short_link.target_url,
+		"doctype": short_link.reference_doctype,
+		"name": short_link.reference_docname,
+	}
+
+
+@frappe.whitelist()
+def custom_search_link(
+	doctype, txt, query=None, filters=None, page_length=10,
+	searchfield=None, reference_doctype=None, ignore_user_permissions=False,
+	*, link_fieldname=None,
+):
+	"""Override for frappe.desk.search.search_link (signature kept identical to upstream).
+
+	Only behaviour change: when `enable_item_search_powerup` is on, swap the Item link
+	query for our enhanced `custom_item_query`; every argument is otherwise forwarded
+	unchanged to the standard `search_link`, so it degrades to stock behaviour when the
+	flag is off. We override `search_link` (the HTTP endpoint) rather than the query
+	because `search_link → search_widget → frappe.call(query)` runs in Python and bypasses
+	`override_whitelisted_methods` lookup on the inner query.
+	"""
+	from thinknxg_powerpack.utils import is_feature_enabled
+	from frappe.desk.search import search_link
+
+	if (
+		query == "erpnext.controllers.queries.item_query"
+		and is_feature_enabled("enable_item_search_powerup")
+	):
+		query = "thinknxg_powerpack.api.custom_item_query"
+
+	return search_link(
+		doctype, txt, query=query, filters=filters, page_length=page_length,
+		searchfield=searchfield, reference_doctype=reference_doctype,
+		ignore_user_permissions=ignore_user_permissions, link_fieldname=link_fieldname,
+	)
+
+
+@frappe.whitelist()
+@frappe.validate_and_sanitize_search_inputs
+def custom_item_query(doctype, txt, searchfield, start, page_len, filters, as_dict=False):
+	"""Enhanced item search replacing thinkNXG ERP's default item_query.
+
+	When enable_item_search_powerup is enabled:
+	- Multi-word: split txt on whitespace; all tokens must match (AND logic)
+	- Wildcard: if % is present, each token is used as-is in LIKE
+	Falls back to the standard thinkNXG ERP item_query when the feature is disabled.
+	"""
+	import json as _json
+
+	from frappe import scrub
+	from frappe.desk.reportview import get_filters_cond, get_match_cond
+	from frappe.utils import nowdate
+
+	from thinknxg_powerpack.utils import is_feature_enabled
+
+	if not is_feature_enabled("enable_item_search_powerup"):
+		from erpnext.controllers.queries import item_query
+		return item_query(doctype, txt, searchfield, start, page_len, filters, as_dict)
+
+	doctype = "Item"
+	conditions = []
+
+	if isinstance(filters, str):
+		filters = _json.loads(filters)
+
+	# thinkNXG ERP (#57352) sends the document's company with every item search. Item has no
+	# company column, so it is not a filter: it limits the search to the items allowed for
+	# that company, as thinkNXG ERP's own item_query does.
+	company = filters.pop("company", None) if isinstance(filters, dict) else None
+	company_cond, company_values = _company_restriction_cond(company)
+
+	# Party Specific Item restrictions — identical to thinkNXG ERP original
+	if filters and isinstance(filters, dict):
+		if filters.get("customer") or filters.get("supplier"):
+			party = filters.get("customer") or filters.get("supplier")
+			item_rules_list = frappe.get_all(
+				"Party Specific Item",
+				filters={
+					"party": ["!=", party],
+					"party_type": "Customer" if filters.get("customer") else "Supplier",
+				},
+				fields=["restrict_based_on", "based_on_value"],
+			)
+
+			filters_dict = {}
+			for rule in item_rules_list:
+				if rule["restrict_based_on"] == "Item":
+					rule["restrict_based_on"] = "name"
+				filters_dict[rule.restrict_based_on] = []
+
+			for rule in item_rules_list:
+				filters_dict[rule.restrict_based_on].append(rule.based_on_value)
+
+			for f in filters_dict:
+				filters[scrub(f)] = ["not in", filters_dict[f]]
+
+			if filters.get("customer"):
+				del filters["customer"]
+			else:
+				del filters["supplier"]
+		else:
+			filters.pop("customer", None)
+			filters.pop("supplier", None)
+
+	# Build SELECT columns (mirrors original)
+	meta = frappe.get_meta(doctype, cached=True)
+	searchfields = meta.get_search_fields()
+	extra_searchfields = [f for f in searchfields if f not in ["name", "description"]]
+
+	columns = ""
+	if extra_searchfields:
+		columns += ", " + ", ".join(extra_searchfields)
+
+	if "description" in searchfields:
+		columns += (
+			""", if(length(tabItem.description) > 40, """
+			"""concat(substr(tabItem.description, 1, 40), "..."), description) as description"""
+		)
+
+	# Columns to search across
+	search_cols = list(
+		dict.fromkeys(
+			[searchfield or "name", "item_code", "item_name", "item_group"]
+			+ [f for f in searchfields if f not in ["name", "description"]]
+		)
+	)
+	# Harden: only ever interpolate real, existing Item columns into the SQL identifier
+	# positions below. `searchfield` is the one caller-supplied identifier that reaches
+	# here; validating the whole set against the doctype's real columns makes the
+	# `.format()` call injection-proof by construction, independent of the input decorator.
+	valid_columns = set(meta.get_valid_columns())
+	search_cols = [c for c in search_cols if c in valid_columns] or ["name"]
+
+	# Parse tokens
+	txt = (txt or "").strip()
+	if not txt:
+		tokens = ["%"]
+	elif "%" in txt:
+		tokens = [txt]  # wildcard mode: use as-is
+	else:
+		tokens = txt.split() or [txt]  # multi-word mode
+
+	# Build per-token AND conditions
+	values = {
+		"today": nowdate(),
+		"start": start,
+		"page_len": page_len,
+		"_txt": txt.replace("%", ""),
+		**company_values,
+	}
+
+	token_clauses = []
+	for i, token in enumerate(tokens):
+		key = f"tok{i}"
+		if "%" in token:
+			# Pad with % on both ends so "ridge%grey" acts as a substring wildcard
+			# (same as the client-side regex behaviour: ridge.*grey anywhere in the string)
+			val = token
+			if not val.startswith("%"):
+				val = "%" + val
+			if not val.endswith("%"):
+				val = val + "%"
+			values[key] = val
+		else:
+			values[key] = f"%{token}%"
+		col_parts = [f"tabItem.{col} LIKE %({key})s" for col in search_cols]
+		col_parts.append(
+			f"tabItem.item_code IN (select parent from `tabItem Barcode` where barcode LIKE %({key})s)"
+		)
+		token_clauses.append("(" + " or ".join(col_parts) + ")")
+
+	search_cond = " and ".join(token_clauses)
+
+	# SECURITY (frappe-sql-format-injection): every *value* (search tokens, dates, paging)
+	# is bound as a query parameter via `values` (%(tokN)s / %(today)s / %(_txt)s /
+	# %(start)s / %(page_len)s). The pieces injected with .format() are SQL *identifiers*
+	# and framework-generated condition fragments — which cannot be bound as parameters:
+	#   • `columns` / `scond` column names come from frappe meta and are filtered above
+	#     against meta.get_valid_columns(), so only real Item columns can appear;
+	#   • `fcond` / `mcond` are produced by thinkNXG's own get_filters_cond / get_match_cond
+	#     (%-escaped), exactly as thinkNXG ERP core's item_query does.
+	# No user-supplied string reaches the SQL text unparameterised.
+	query_sql = """select tabItem.name {columns}
+		from tabItem
+		where tabItem.docstatus < 2
+			and tabItem.disabled=0
+			and tabItem.has_variants=0
+			and (tabItem.end_of_life > %(today)s or ifnull(tabItem.end_of_life, '0000-00-00')='0000-00-00')
+			and ({scond})
+			{fcond} {mcond} {company_cond}
+		order by
+			if(locate(%(_txt)s, name), locate(%(_txt)s, name), 99999),
+			if(locate(%(_txt)s, item_name), locate(%(_txt)s, item_name), 99999),
+			idx desc,
+			name, item_name
+		limit %(start)s, %(page_len)s""".format(
+		columns=columns,
+		scond=search_cond,
+		fcond=get_filters_cond(doctype, filters, conditions).replace("%", "%%"),
+		mcond=get_match_cond(doctype).replace("%", "%%"),
+		company_cond=company_cond,
+	)
+
+	# nosemgrep: frappe-sql-format-injection -- identifiers validated above; all values bound as params
+	return frappe.db.sql(query_sql, values, as_dict=as_dict)
+
+
+def _company_restriction_cond(company):
+	"""thinkNXG ERP's "Allowed Companies" restriction on Item as (SQL condition, its bound values),
+	rendered the way thinkNXG ERP's own item_query does. Empty on an thinkNXG ERP without it."""
+	if not company:
+		return "", {}
+	try:
+		from erpnext.stock.doctype.company_restriction.company_restriction import get_restriction_criterion
+	except ImportError:
+		return "", {}
+	from frappe.query_builder.terms import NamedParameterWrapper
+
+	params = NamedParameterWrapper()
+	cond = get_restriction_criterion("Item", [company]).get_sql(
+		with_namespace=True, quote_char="`", param_wrapper=params, subquery=True
+	)
+	return "and " + cond, params.get_parameters()
+
+
+@frappe.whitelist()
+def resolve_bill_numbers_for_credit(company: str, supplier: str, bill_numbers: str) -> dict:
+	"""
+	Resolve pasted bill_no strings to open Purchase Invoices for a given supplier/company.
+
+	Used by the "Zero Allocate with Paste" PowerUp in Payment Reconciliation.
+
+	Args:
+		company: Company to scope the query to.
+		supplier: Supplier to scope the query to.
+		bill_numbers: JSON-encoded list of bill_no strings.
+
+	Returns:
+		dict with keys:
+			matched:   list of {bill_no, pi_name, outstanding_amount, currency,
+			                    conversion_rate, posting_date}
+			ambiguous: list of {bill_no, candidates: [{pi_name, posting_date,
+			                    outstanding_amount}, ...]}
+			not_found: list of bill_no strings
+		Input order is preserved in all three partitions.
+	"""
+	import json as _json
+
+	from thinknxg_powerpack.utils import is_feature_enabled
+
+	if not is_feature_enabled("enable_payment_reconciliation_powerup"):
+		frappe.throw(_("Payment Reconciliation PowerUp is not enabled in PowerPack Settings"))
+
+	if not frappe.has_permission("Purchase Invoice", "read"):
+		frappe.throw(_("Not permitted to read Purchase Invoice"), frappe.PermissionError)
+
+	# Input sanitation
+	try:
+		parsed = _json.loads(bill_numbers) if isinstance(bill_numbers, str) else bill_numbers
+	except ValueError:
+		frappe.throw(_("bill_numbers must be a JSON-encoded list of strings"))
+	if not isinstance(parsed, list):
+		frappe.throw(_("bill_numbers must be a JSON-encoded list of strings"))
+
+	# Strip, drop blanks, uniquify preserving first-seen order
+	seen = set()
+	cleaned: list[str] = []
+	for raw in parsed:
+		if not isinstance(raw, str):
+			continue
+		s = raw.strip()
+		if not s or s in seen:
+			continue
+		seen.add(s)
+		cleaned.append(s)
+
+	if len(cleaned) > 200:
+		frappe.throw(_("Too many bill numbers in one paste (max 200)"))
+
+	if not cleaned:
+		return {"matched": [], "ambiguous": [], "not_found": []}
+
+	rows = frappe.db.get_all(
+		"Purchase Invoice",
+		filters={
+			"supplier": supplier,
+			"company": company,
+			"docstatus": 1,
+			"outstanding_amount": [">", 0],
+			"bill_no": ["in", cleaned],
+		},
+		fields=[
+			"name", "bill_no", "outstanding_amount", "currency",
+			"conversion_rate", "posting_date", "grand_total",
+		],
+	)
+
+	# Group rows by bill_no
+	by_bill: dict[str, list] = {}
+	for r in rows:
+		by_bill.setdefault(r["bill_no"], []).append(r)
+
+	matched: list[dict] = []
+	ambiguous: list[dict] = []
+	not_found: list[str] = []
+
+	for bill_no in cleaned:
+		candidates = by_bill.get(bill_no, [])
+		if len(candidates) == 1:
+			c = candidates[0]
+			matched.append({
+				"bill_no": bill_no,
+				"pi_name": c["name"],
+				"outstanding_amount": c["outstanding_amount"],
+				"currency": c["currency"],
+				"conversion_rate": c["conversion_rate"],
+				"posting_date": c["posting_date"],
+			})
+		elif len(candidates) > 1:
+			ambiguous.append({
+				"bill_no": bill_no,
+				"candidates": [
+					{
+						"pi_name": c["name"],
+						"posting_date": c["posting_date"],
+						"outstanding_amount": c["outstanding_amount"],
+					}
+					for c in candidates
+				],
+			})
+		else:
+			not_found.append(bill_no)
+
+	return {"matched": matched, "ambiguous": ambiguous, "not_found": not_found}
+
+
+@frappe.whitelist()
+def get_lens_data(item_code: str, customer: str = None, doctype: str = None) -> dict:
+    if not item_code:
+        return {}
+
+    from thinknxg_powerpack.utils import is_feature_enabled
+    if not is_feature_enabled("enable_lens"):
+        return {}
+
+    item = frappe.db.get_value("Item", item_code, ["item_name", "item_group"], as_dict=True)
+    if not item:
+        return {}
+
+    result = {
+        "item_name": item.item_name,
+        "item_group": item.item_group,
+    }
+
+    # Stock totals and valuation rate
+    stock_rows = frappe.db.sql("""
+        SELECT warehouse, actual_qty, valuation_rate
+        FROM `tabBin`
+        WHERE item_code = %s AND actual_qty != 0
+        ORDER BY actual_qty DESC
+    """, (item_code,), as_dict=True)
+
+    result["total_stock"] = sum(r.actual_qty for r in stock_rows)
+
+    if frappe.has_permission("Stock Ledger Entry", "read"):
+        total_weighted = sum(r.actual_qty * (r.valuation_rate or 0) for r in stock_rows if r.actual_qty > 0)
+        total_positive_qty = sum(r.actual_qty for r in stock_rows if r.actual_qty > 0)
+        result["valuation_rate"] = (total_weighted / total_positive_qty) if total_positive_qty else 0
+    else:
+        result["valuation_rate"] = 0
+
+    # Per-warehouse breakdown — only for users with Bin read permission
+    if frappe.has_permission("Bin", "read"):
+        result["stock_by_warehouse"] = [
+            {"warehouse": r.warehouse, "qty": r.actual_qty}
+            for r in stock_rows
+        ]
+
+    sales_doctypes = {"Quotation", "Sales Order", "Sales Invoice"}
+    purchase_doctypes = {"Purchase Order", "Purchase Receipt", "Purchase Invoice"}
+
+    if doctype in sales_doctypes:
+        _fetch_sales_history(result, item_code, customer)
+
+    elif doctype in purchase_doctypes:
+        _fetch_purchase_history(result, item_code)
+
+    # Price lists: the selling lists that already price the item. On buying documents the lens can
+    # also set prices, so it offers the other enabled selling lists (the "+ Add price list" picker)
+    # and gives a new item one blank row for the default selling list.
+    result["price_lists"] = frappe.db.sql("""
+        SELECT ip.name AS item_price_name, ip.price_list, ip.price_list_rate AS rate, ip.currency
+        FROM `tabItem Price` ip
+        INNER JOIN `tabPrice List` pl ON ip.price_list = pl.name
+        WHERE ip.item_code = %s AND pl.selling = 1 AND pl.enabled = 1
+        ORDER BY ip.price_list
+    """, (item_code,), as_dict=True)
+    if doctype in purchase_doctypes:
+        lists = frappe.get_all("Price List", filters={"enabled": 1, "selling": 1},
+                               fields=["name AS price_list", "currency"], order_by="name")
+        if not result["price_lists"]:
+            default = frappe.db.get_single_value("Selling Settings", "selling_price_list")
+            first = next((p for p in lists if p.price_list == default), lists[0] if lists else None)
+            if first:
+                result["price_lists"] = [{"item_price_name": None, "price_list": first.price_list,
+                                          "rate": 0, "currency": first.currency}]
+        shown = {r["price_list"] for r in result["price_lists"]}
+        result["addable_price_lists"] = [p for p in lists if p.price_list not in shown]
+
+    return result
+
+
+def _fetch_sales_history(result: dict, item_code: str, customer: str) -> None:
+    if customer:
+        result["sales_to_customer"] = frappe.db.sql("""
+            SELECT combined.name, combined.posting_date, combined.qty,
+                   combined.rate, combined.status, combined.source_doctype
+            FROM (
+                SELECT si.name, si.posting_date, sii.qty, sii.rate,
+                       si.status, 'Sales Invoice' AS source_doctype
+                FROM `tabSales Invoice Item` sii
+                INNER JOIN `tabSales Invoice` si ON sii.parent = si.name
+                WHERE sii.item_code = %s AND si.customer = %s AND si.docstatus = 1
+                UNION ALL
+                SELECT so.name, so.transaction_date AS posting_date, soi.qty, soi.rate,
+                       so.status, 'Sales Order' AS source_doctype
+                FROM `tabSales Order Item` soi
+                INNER JOIN `tabSales Order` so ON soi.parent = so.name
+                WHERE soi.item_code = %s AND so.customer = %s AND so.docstatus = 1
+            ) combined
+            ORDER BY combined.posting_date DESC
+            LIMIT 5
+        """, (item_code, customer, item_code, customer), as_dict=True)
+    else:
+        result["sales_to_customer"] = []
+
+    if customer:
+        result["sales_to_others"] = frappe.db.sql("""
+            SELECT si.name, si.posting_date, sii.qty, sii.rate, si.customer
+            FROM `tabSales Invoice Item` sii
+            INNER JOIN `tabSales Invoice` si ON sii.parent = si.name
+            WHERE sii.item_code = %s AND si.customer != %s AND si.docstatus = 1
+            ORDER BY si.posting_date DESC
+            LIMIT 5
+        """, (item_code, customer), as_dict=True)
+    else:
+        result["sales_to_others"] = frappe.db.sql("""
+            SELECT si.name, si.posting_date, sii.qty, sii.rate, si.customer
+            FROM `tabSales Invoice Item` sii
+            INNER JOIN `tabSales Invoice` si ON sii.parent = si.name
+            WHERE sii.item_code = %s AND si.docstatus = 1
+            ORDER BY si.posting_date DESC
+            LIMIT 5
+        """, (item_code,), as_dict=True)
+
+
+def _fetch_purchase_history(result: dict, item_code: str) -> None:
+    # Fetch each doctype separately so we can deduplicate: if a PI exists for a
+    # given PO/PR, the upstream docs add no new information and are suppressed.
+    pi_rows = frappe.db.sql("""
+        SELECT pi.name, pi.posting_date, pii.qty, pii.rate, pi.supplier,
+               'Purchase Invoice' AS source_doctype,
+               pii.purchase_receipt AS linked_pr,
+               pii.purchase_order   AS linked_po
+        FROM `tabPurchase Invoice Item` pii
+        INNER JOIN `tabPurchase Invoice` pi ON pii.parent = pi.name
+        WHERE pii.item_code = %s AND pi.docstatus = 1
+        ORDER BY pi.posting_date DESC
+        LIMIT 20
+    """, (item_code,), as_dict=True)
+
+    pi_linked_prs = {r.linked_pr for r in pi_rows if r.linked_pr}
+    pi_linked_pos = {r.linked_po for r in pi_rows if r.linked_po}
+
+    pr_rows = frappe.db.sql("""
+        SELECT pr.name, pr.posting_date, pri.qty, pri.rate, pr.supplier,
+               'Purchase Receipt' AS source_doctype,
+               pri.purchase_order AS linked_po
+        FROM `tabPurchase Receipt Item` pri
+        INNER JOIN `tabPurchase Receipt` pr ON pri.parent = pr.name
+        WHERE pri.item_code = %s AND pr.docstatus = 1
+        ORDER BY pr.posting_date DESC
+        LIMIT 20
+    """, (item_code,), as_dict=True)
+
+    # Keep only PRs not already represented by a PI
+    pr_rows = [r for r in pr_rows if r.name not in pi_linked_prs]
+    pr_linked_pos = {r.linked_po for r in pr_rows if r.linked_po}
+
+    excluded_pos = pi_linked_pos | pr_linked_pos
+
+    po_rows = frappe.db.sql("""
+        SELECT po.name, po.transaction_date AS posting_date, poi.qty, poi.rate, po.supplier,
+               'Purchase Order' AS source_doctype
+        FROM `tabPurchase Order Item` poi
+        INNER JOIN `tabPurchase Order` po ON poi.parent = po.name
+        WHERE poi.item_code = %s AND po.docstatus = 1
+        ORDER BY po.transaction_date DESC
+        LIMIT 20
+    """, (item_code,), as_dict=True)
+
+    # Keep only POs not already represented by a PI or an included PR
+    po_rows = [r for r in po_rows if r.name not in excluded_pos]
+
+    combined = []
+    for rows in (pi_rows, pr_rows, po_rows):
+        for r in rows:
+            combined.append({
+                "name": r.name,
+                "posting_date": r.posting_date,
+                "qty": r.qty,
+                "rate": r.rate,
+                "supplier": r.supplier,
+                "source_doctype": r.source_doctype,
+            })
+
+    combined.sort(key=lambda r: r["posting_date"] or "", reverse=True)
+    result["purchase_history"] = combined[:10]
+
+
+@frappe.whitelist()
+def update_item_prices(updates) -> dict:
+    import json
+    from thinknxg_powerpack.utils import is_feature_enabled
+
+    if not is_feature_enabled("enable_lens"):
+        return {}
+
+    if isinstance(updates, str):
+        updates = json.loads(updates)
+
+    updated = []
+    for upd in updates:
+        name = upd.get("item_price_name")
+        new_rate = upd.get("new_rate")
+        item_code = upd.get("item_code")
+        price_list = upd.get("price_list")
+
+        if new_rate is None:
+            continue
+        try:
+            new_rate = float(new_rate)
+        except (ValueError, TypeError):
+            continue
+        if new_rate <= 0:
+            continue
+
+        if name:
+            doc = frappe.get_doc("Item Price", name)
+            doc.price_list_rate = new_rate
+            doc.save()
+            updated.append(name)
+        elif item_code and price_list:
+            frappe.has_permission("Item Price", "create", throw=True)
+            currency = frappe.db.get_value("Price List", price_list, "currency") or \
+                frappe.defaults.get_defaults().get("currency")
+            doc = frappe.get_doc({
+                "doctype": "Item Price",
+                "item_code": item_code,
+                "price_list": price_list,
+                "price_list_rate": new_rate,
+                "currency": currency,
+            })
+            doc.insert()
+            updated.append(doc.name)
+
+    frappe.db.commit()
+    return {"updated": updated, "count": len(updated)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PRICE IMPORT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@frappe.whitelist()
+def preview_price_import(file_content: str, file_name: str) -> list:
+    frappe.has_permission("Item Price", "read", throw=True)
+
+    import base64
+
+    raw = base64.b64decode(file_content)
+    rows = _parse_price_file(raw, file_name)
+
+    if not rows:
+        return []
+
+    all_item_codes = list({r["item_code"] for r in rows})
+
+    existing_items = set(
+        frappe.db.get_all("Item", filters=[["name", "in", all_item_codes]], pluck="name")
+    )
+
+    ip_rows = frappe.db.get_all(
+        "Item Price",
+        filters=[["item_code", "in", all_item_codes]],
+        fields=["name", "item_code", "price_list", "price_list_rate"],
+    )
+    item_price_map = {}
+    for ip in ip_rows:
+        key = (ip["item_code"], ip["price_list"])
+        if key not in item_price_map:  # first record wins if duplicates exist
+            item_price_map[key] = ip
+
+    enriched = []
+    for row in rows:
+        item_code = row["item_code"]
+        price_list = row["price_list"]
+        rate = row["rate"]
+
+        if item_code not in existing_items:
+            enriched.append({
+                "item_code": item_code,
+                "price_list": price_list,
+                "rate": rate,
+                "existing_rate": None,
+                "item_price_name": None,
+                "status": "missing",
+            })
+            continue
+
+        ip = item_price_map.get((item_code, price_list))
+        if ip:
+            enriched.append({
+                "item_code": item_code,
+                "price_list": price_list,
+                "rate": rate,
+                "existing_rate": ip["price_list_rate"],
+                "item_price_name": ip["name"],
+                "status": "update",
+            })
+        else:
+            enriched.append({
+                "item_code": item_code,
+                "price_list": price_list,
+                "rate": rate,
+                "existing_rate": None,
+                "item_price_name": None,
+                "status": "new",
+            })
+
+    return enriched
+
+
+def _parse_price_file(raw: bytes, file_name: str) -> list:
+    name_lower = (file_name or "").lower()
+    if name_lower.endswith(".xlsx"):
+        return _parse_xlsx(raw)
+    if name_lower.endswith(".csv"):
+        return _parse_csv(raw)
+    frappe.throw(_("Unsupported file type. Please upload a .xlsx or .csv file."))
+    return []  # unreachable — frappe.throw raises; satisfies type checkers
+
+
+def _parse_csv(raw: bytes) -> list:
+    import csv
+    import io
+
+    text = raw.decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(text))
+    rows = []
+    for raw_row in reader:
+        row = {k.strip().lower(): v for k, v in raw_row.items() if k}
+        rows.append(row)
+    return _extract_validated_rows(rows)
+
+
+def _parse_xlsx(raw: bytes) -> list:
+    import io
+    import openpyxl
+
+    wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+    try:
+        ws = wb.active
+        headers = None
+        rows = []
+        for sheet_row in ws.iter_rows(values_only=True):
+            if headers is None:
+                headers = [str(c).strip().lower() if c is not None else "" for c in sheet_row]
+                continue
+            if not any(c is not None for c in sheet_row):
+                continue
+            rows.append(dict(zip(headers, sheet_row)))
+        return _extract_validated_rows(rows)
+    finally:
+        wb.close()
+
+
+def _extract_validated_rows(rows: list) -> list:
+    result = []
+    for row in rows:
+        item_code = str(row.get("item_code") or "").strip()
+        price_list = str(row.get("price_list") or "").strip()
+        rate_raw = row.get("rate")
+
+        if not item_code or not price_list or rate_raw is None or str(rate_raw).strip() == "":
+            continue
+        try:
+            rate = float(str(rate_raw).replace(",", ""))
+        except (ValueError, TypeError):
+            continue
+
+        result.append({"item_code": item_code, "price_list": price_list, "rate": rate})
+    return result
+
+
+@frappe.whitelist()
+def apply_price_import(rows: str) -> dict:
+    frappe.has_permission("Item Price", "write", throw=True)
+
+    rows = frappe.parse_json(rows)
+
+    has_new = any(r.get("status") == "new" for r in rows)
+    if has_new:
+        frappe.has_permission("Item Price", "create", throw=True)
+
+    updated = 0
+    created = 0
+    skipped = 0
+
+    for row in rows:
+        status = row.get("status")
+        if status == "missing":
+            skipped += 1
+            continue
+
+        item_code = row.get("item_code")
+        price_list = row.get("price_list")
+        rate = frappe.utils.flt(row.get("rate", 0))
+
+        if status == "update":
+            ip_name = row.get("item_price_name")
+            if ip_name:
+                frappe.db.set_value("Item Price", ip_name, "price_list_rate", rate)
+                updated += 1
+            else:
+                skipped += 1
+
+        elif status == "new":
+            try:
+                frappe.get_doc({
+                    "doctype": "Item Price",
+                    "item_code": item_code,
+                    "price_list": price_list,
+                    "price_list_rate": rate,
+                }).insert()
+                created += 1
+            except frappe.exceptions.DuplicateEntryError:
+                frappe.db.rollback()
+                skipped += 1
+
+    return {"updated": updated, "created": created, "skipped": skipped}
+
+
+@frappe.whitelist()
+def import_email_group_subscribers_by_item(email_group, filter_type, filter_value):
+	import contextlib
+
+	from thinknxg_powerpack.utils import is_feature_enabled
+
+	if not is_feature_enabled("enable_email_group_powerup"):
+		frappe.throw(_("Email Group Powerup is disabled in PowerPack Settings"))
+
+	if not frappe.has_permission("Email Group", "write", email_group):
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
+
+	if filter_type == "Item":
+		item_condition = "sii.item_code = %(filter_value)s"
+	elif filter_type == "Item Group":
+		item_condition = (
+			"sii.item_code IN (SELECT name FROM `tabItem` WHERE item_group = %(filter_value)s)"
+		)
+	else:
+		frappe.throw(_("filter_type must be 'Item' or 'Item Group'"))
+
+	# Customers who bought the item on a submitted Sales Invoice. Referenced three
+	# times below; kept as a plain subquery string (no user input) so each UNION arm
+	# can be pruned independently by the optimizer.
+	matched_customers = f"""
+		SELECT DISTINCT si.customer
+		FROM `tabSales Invoice Item` sii
+		JOIN `tabSales Invoice` si ON si.name = sii.parent
+		WHERE si.docstatus = 1
+		  AND {item_condition}
+	"""
+
+	# Emails come from three places. Customer.email_id is a read-only fetch of the
+	# primary contact, so on its own it misses customers with no primary contact set
+	# and every non-primary contact.
+	#
+	# SQL-injection note (see prior marketplace review flag on this file): the only
+	# f-string-interpolated fragments below are `item_condition` and `matched_customers`,
+	# both built above from hardcoded Python string literals selected by the
+	# if/elif/else, never from `filter_value`. `filter_value` itself is never
+	# interpolated — it stays a bound named parameter (`%(filter_value)s`) passed via
+	# the params dict to frappe.db.sql.
+	rows = frappe.db.sql(
+		f"""
+		SELECT DISTINCT email_id
+		FROM (
+			SELECT c.email_id
+			FROM `tabCustomer` c
+			WHERE c.name IN ({matched_customers})
+
+			UNION ALL
+
+			SELECT con.email_id
+			FROM `tabDynamic Link` dl
+			JOIN `tabContact` con ON con.name = dl.parent
+			WHERE dl.parenttype = 'Contact'
+			  AND dl.link_doctype = 'Customer'
+			  AND dl.link_name IN ({matched_customers})
+
+			UNION ALL
+
+			SELECT ce.email_id
+			FROM `tabDynamic Link` dl
+			JOIN `tabContact Email` ce ON ce.parent = dl.parent AND ce.parenttype = 'Contact'
+			WHERE dl.parenttype = 'Contact'
+			  AND dl.link_doctype = 'Customer'
+			  AND dl.link_name IN ({matched_customers})
+		) AS all_emails
+		WHERE email_id IS NOT NULL AND email_id != ''
+		""",
+		{"filter_value": filter_value},
+		as_dict=True,
+	)
+
+	added = 0
+	for row in rows:
+		with contextlib.suppress(frappe.UniqueValidationError, frappe.InvalidEmailAddressError):
+			frappe.get_doc(
+				{
+					"doctype": "Email Group Member",
+					"email_group": email_group,
+					"email": row.email_id,
+				}
+			).insert(ignore_permissions=True)
+			added += 1
+
+	eg = frappe.get_doc("Email Group", email_group)
+	total = eg.update_total_subscribers()
+
+	return {"added": added, "total": total}
+
+
+# Resolves each Email Group Member email back to a person and an account.
+#
+# Contact is the source of truth for names; Customer.email_id/first_name/last_name are
+# read-only fetches of the primary contact, so they are only a fallback. src_rank orders
+# those two sources; is_primary_contact, then modified, then tie_key break ties, so one
+# email always yields exactly one deterministic row (Zoho and Mailchimp dedupe on email
+# and would otherwise pick arbitrarily). tie_key is the final stable key: without it a
+# Contact linked to two Customers produces two candidates that tie on every other term
+# and the winner is whatever order the executor happened to emit.
+#
+# Fallback is per-field, not per-row. A Contact with no Dynamic Link to a Customer wins
+# the name but carries a NULL customer_name; FIRST_VALUE picks the best non-blank
+# customer_name for the same email independently, using the same precedence, so a
+# Customer-sourced company name is not thrown away just because a Contact matched.
+#
+# The IN (...) filters compare the bare column, never LOWER(column): all four email
+# columns are utf8mb4_unicode_ci, so the comparison is already case-insensitive, and
+# wrapping the column in LOWER() only makes the predicate non-sargable. LOWER() is kept
+# on the projected key_email so PARTITION BY and the final join collapse case-differing
+# addresses into exactly one row without depending on collation semantics.
+_EXPORT_SQL = """
+WITH group_emails AS (
+	SELECT DISTINCT LOWER(email) AS key_email
+	FROM `tabEmail Group Member`
+	WHERE email_group = %(email_group)s AND unsubscribed = 0
+),
+candidates AS (
+	SELECT
+		LOWER(ce.email_id) AS key_email,
+		c.first_name AS first_name,
+		c.last_name AS last_name,
+		cust.customer_name AS customer_name,
+		1 AS src_rank,
+		COALESCE(c.is_primary_contact, 0) AS is_primary_contact,
+		c.modified AS modified,
+		CONCAT('1:', ce.name, ':', COALESCE(cust.name, '')) AS tie_key
+	FROM `tabContact Email` ce
+	JOIN `tabContact` c ON c.name = ce.parent AND ce.parenttype = 'Contact'
+	LEFT JOIN `tabDynamic Link` dl
+		ON dl.parent = c.name AND dl.parenttype = 'Contact' AND dl.link_doctype = 'Customer'
+	LEFT JOIN `tabCustomer` cust ON cust.name = dl.link_name
+	WHERE ce.email_id IS NOT NULL AND ce.email_id != ''
+	  AND ce.email_id IN (SELECT key_email FROM group_emails)
+
+	UNION ALL
+
+	SELECT
+		LOWER(c.email_id), c.first_name, c.last_name, cust.customer_name, 1,
+		COALESCE(c.is_primary_contact, 0), c.modified,
+		CONCAT('2:', c.name, ':', COALESCE(cust.name, ''))
+	FROM `tabContact` c
+	LEFT JOIN `tabDynamic Link` dl
+		ON dl.parent = c.name AND dl.parenttype = 'Contact' AND dl.link_doctype = 'Customer'
+	LEFT JOIN `tabCustomer` cust ON cust.name = dl.link_name
+	WHERE c.email_id IS NOT NULL AND c.email_id != ''
+	  AND c.email_id IN (SELECT key_email FROM group_emails)
+
+	UNION ALL
+
+	SELECT
+		LOWER(cust.email_id), cust.first_name, cust.last_name, cust.customer_name, 2,
+		0, cust.modified,
+		CONCAT('3:', cust.name)
+	FROM `tabCustomer` cust
+	WHERE cust.email_id IS NOT NULL AND cust.email_id != ''
+	  AND cust.email_id IN (SELECT key_email FROM group_emails)
+),
+ranked AS (
+	SELECT
+		key_email, first_name, last_name,
+		FIRST_VALUE(customer_name) OVER (
+			PARTITION BY key_email
+			ORDER BY
+				(customer_name IS NULL OR customer_name = '') ASC,
+				src_rank ASC, is_primary_contact DESC, modified DESC, tie_key ASC
+			ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+		) AS customer_name,
+		ROW_NUMBER() OVER (
+			PARTITION BY key_email
+			ORDER BY src_rank ASC, is_primary_contact DESC, modified DESC, tie_key ASC
+		) AS rn
+	FROM candidates
+)
+SELECT
+	egm.email AS email,
+	r.customer_name AS customer_name,
+	r.first_name AS first_name,
+	r.last_name AS last_name
+FROM `tabEmail Group Member` egm
+LEFT JOIN ranked r ON r.key_email = LOWER(egm.email) AND r.rn = 1
+WHERE egm.email_group = %(email_group)s AND egm.unsubscribed = 0
+ORDER BY egm.email
+"""
+
+
+# Excel and LibreOffice evaluate any cell whose text starts with one of these, no matter
+# how the field is quoted in the file, so a customer named `=HYPERLINK(...)` would run on
+# open. csv.QUOTE_NONNUMERIC does not help.
+_CSV_INJECTION_PREFIXES = ("=", "+", "-", "@")
+
+
+def _csv_safe(value):
+	"""Neutralise spreadsheet formula injection in one exported cell.
+
+	Prefixes a single quote, which Excel/LibreOffice consume as a "treat as text"
+	marker, so a legitimate value like `-Foo` still displays as `-Foo`.
+	"""
+	text = "" if value is None else str(value)
+	if text.startswith(_CSV_INJECTION_PREFIXES):
+		return "'" + text
+	return text
+
+
+@frappe.whitelist(methods=["GET"])
+def export_email_group_csv(email_group):
+	"""Download an Email Group's subscribers as a CSV for bulk mail tools.
+
+	Column headers match Zoho Campaigns' default field names so its importer
+	auto-maps them; the same file imports cleanly into Mailchimp, Brevo, etc.
+	"""
+	from frappe.utils.csvutils import build_csv_response
+
+	from thinknxg_powerpack.utils import is_feature_enabled
+
+	if not is_feature_enabled("enable_email_group_powerup"):
+		frappe.throw(_("Email Group Powerup is disabled in PowerPack Settings"))
+
+	if not frappe.has_permission("Email Group", "read", email_group):
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
+
+	# The export discloses customer names and emails, so Email Group access alone
+	# is not sufficient.
+	if not frappe.has_permission("Customer", "read"):
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
+
+	rows = frappe.db.sql(_EXPORT_SQL, {"email_group": email_group}, as_dict=True)
+
+	data = [["Company Name", "First Name", "Last Name", "Contact Email"]]
+	for row in rows:
+		data.append(
+			[
+				_csv_safe(row.customer_name),
+				_csv_safe(row.first_name),
+				_csv_safe(row.last_name),
+				_csv_safe(row.email),
+			]
+		)
+
+	build_csv_response(data, f"{frappe.scrub(email_group)}-subscribers-{frappe.utils.today()}")
+
+
+@frappe.whitelist()
+def get_item_group_tree_for_rules() -> list:
+	"""Return all Item Groups ordered by tree position with computed depth."""
+	return frappe.db.sql(
+		"""
+		SELECT
+			ig.name,
+			ig.lft,
+			ig.rgt,
+			ig.is_group,
+			ig.parent_item_group,
+			(SELECT COUNT(*) FROM `tabItem Group` p
+			 WHERE p.lft < ig.lft AND p.rgt > ig.rgt) AS depth
+		FROM `tabItem Group` ig
+		ORDER BY ig.lft
+		""",
+		as_dict=True,
+	)

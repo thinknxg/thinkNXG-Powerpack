@@ -1,0 +1,996 @@
+/**
+ * thinkNXG PowerPack - Global Client Scripts
+ *
+ * Bundled via thinknxg_powerpack.bundle.js (see hooks.py app_include_js).
+ */
+
+window.thinkNXGPowerPack = window.thinkNXGPowerPack || {};
+
+// Walkthrough slugs on https://thinknxg.com/walkthroughs/<slug>
+thinkNXGPowerPack.WALKTHROUGH_SLUGS = {
+	withholding: 'kenya-withholding',
+	withholding_deposits: 'kenya-withholding-deposits',
+	sales_insights: 'powerpack-sales-insights',
+};
+
+thinkNXGPowerPack.WALKTHROUGH_TITLES = {
+	'kenya-withholding': 'Pay a supplier with Kenya withholding',
+	'kenya-withholding-deposits': 'Withholding on a supplier deposit',
+	'powerpack-sales-insights': 'See stock, cost and margin while you quote',
+	'powerpack-tour': 'PowerPack tour: faster selling, buying and pricing',
+	'powerpack-min-selling-price': 'Minimum Selling Price: a floor under every sale',
+	'powerpack-rate-picker': 'Pick the price from any price list',
+	'powerpack-copy-as-image': 'Copy a document as an image or a message',
+	'powerpack-zero-allocate': 'Reconcile a payment by hand with Zero Allocate',
+	'powerpack-duplicate-pin': 'KRA PIN checks: duplicates and the name from KRA',
+};
+
+/**
+ * Powerup > Help. One button per form: frappe keeps the first button with a label, so each feature
+ * registers its walkthrough and the click opens it, or lists them when the form has several.
+ */
+thinkNXGPowerPack.addHelp = function (frm, slug) {
+	const slugs = frm.__pp_help || (frm.__pp_help = []);
+	if (!slugs.includes(slug)) slugs.push(slug);
+	frm.add_custom_button(__('Help'), function () {
+		const url = (s) => 'https://thinknxg.com/walkthroughs/' + s;
+		if (frm.__pp_help.length === 1) {
+			window.open(url(frm.__pp_help[0]), '_blank', 'noopener');
+			return;
+		}
+		frappe.msgprint({
+			title: __('PowerPack walkthroughs'),
+			message: frm.__pp_help.map((s) =>
+				`<p><a href="${url(s)}" target="_blank" rel="noopener">${frappe.utils.escape_html(__(thinkNXGPowerPack.WALKTHROUGH_TITLES[s] || s))}</a></p>`
+			).join(''),
+		});
+	}, __('Powerup'));
+};
+
+// Help for features whose own scripts add no Powerup button on these forms: [slug, setting, doctypes]
+[
+	['powerpack-tour', 'enable_quick_pay', ['Sales Order']],
+	['powerpack-tour', 'enable_lens', ['Purchase Order']],
+	['powerpack-min-selling-price', 'enable_min_selling_price', ['Quotation', 'Sales Order', 'Sales Invoice', 'POS Invoice', 'Delivery Note']],
+	['powerpack-rate-picker', 'enable_rate_price_picker', ['Quotation', 'Sales Order', 'Sales Invoice']],
+	['powerpack-copy-as-image', 'enable_copy_as_image', ['Quotation', 'Sales Order', 'Sales Invoice', 'Purchase Order']],
+	['powerpack-zero-allocate', 'enable_payment_reconciliation_powerup', ['Payment Reconciliation']],
+	['powerpack-duplicate-pin', 'enable_duplicate_tax_id_check', ['Customer', 'Supplier']],
+].forEach(([slug, setting, doctypes]) => {
+	doctypes.forEach((dt) => frappe.ui.form.on(dt, {
+		refresh(frm) {
+			thinkNXGPowerPack.Settings.isEnabled(setting, (enabled) => {
+				if (enabled) thinkNXGPowerPack.addHelp(frm, slug);
+			});
+		},
+	}));
+});
+
+/**
+ * PowerPack's own compact number formatter.
+ *
+ * Lives here because bulk_selection.js needs it.
+ * It used to be a bare top-level `function format_number()` in bulk_selection.js,
+ * which in a classic script overwrote frappe's core `window.format_number`
+ * (number_format.js:90) for EVERY desk page -- frappe's and erpnext's own rendering
+ * included. That version ignores the site number format, hardcodes en-US, defaults
+ * to 2 decimals instead of float_precision, and returns an em dash for null, so the
+ * clobber quietly changed numbers well outside PowerPack.
+ *
+ * Deliberately unchanged in behaviour: both callers render exactly as they did
+ * before. The only difference is that frappe's global is no longer replaced.
+ */
+thinkNXGPowerPack.formatNumber = function (value, format, decimals) {
+    if (value === null || value === undefined) return '—';
+    // toFixed-style formatting, deliberately independent of frappe's formatter system
+    const precision = decimals || 2;
+    return parseFloat(value).toLocaleString('en-US', {
+        minimumFractionDigits: precision,
+        maximumFractionDigits: precision
+    });
+};
+
+$(document).ready(function () {
+    // Apply compact theme if enabled
+    thinkNXGPowerPack.Settings.isEnabled('enable_compact_theme', function (enabled) {
+        $('body').toggleClass('compact-theme', enabled);
+    });
+});
+
+/**
+ * Company Border Indicator
+ * Renders fixed top/bottom colored bars based on the company of the document
+ * currently open in a form view. Hidden on lists, reports, the workspace, and
+ * doctypes that have no company field.
+ */
+thinkNXGPowerPack.CompanyBorder = {
+    _TOP_ID: 'pp-border-top',
+    _BOT_ID: 'pp-border-bottom',
+
+    // Resolve the accent from a form: use its document's company, if any.
+    applyFromForm: function (frm) {
+        var company = (frm && frm.doc) ? frm.doc.company : null;
+        thinkNXGPowerPack.CompanyBorder.applyForCompany(company);
+    },
+
+    // Render the accent for a given company, or remove it if none/unconfigured.
+    applyForCompany: function (company) {
+        var self = thinkNXGPowerPack.CompanyBorder;
+        if (!company) {
+            self._remove();
+            return;
+        }
+        thinkNXGPowerPack.Settings.get(function (settings) {
+            var rows = settings.company_borders || [];
+            var row = rows.find(function (r) { return r.company === company; });
+            if (!row || !row.color) {
+                self._remove();
+                return;
+            }
+            self._render(row.color, row.top_border || 0, row.bottom_border || 0);
+        });
+    },
+
+    _render: function (color, topPx, botPx) {
+        this._setBar(this._TOP_ID, color, topPx, 'top');
+        this._setBar(this._BOT_ID, color, botPx, 'bottom');
+    },
+
+    _setBar: function (id, color, px, edge) {
+        var $el = $('#' + id);
+        if (px <= 0) {
+            $el.remove();
+            return;
+        }
+        if (!$el.length) {
+            $el = $('<div>').attr('id', id).css('pointer-events', 'none');
+            $('body').append($el);
+        }
+        $el.css({
+            position: 'fixed',
+            left: 0,
+            right: 0,
+            height: px + 'px',
+            background: color,
+            zIndex: 9999,
+            top: edge === 'top' ? 0 : 'auto',
+            bottom: edge === 'bottom' ? 0 : 'auto'
+        });
+    },
+
+    _remove: function () {
+        $('#' + this._TOP_ID + ', #' + this._BOT_ID).remove();
+    }
+};
+
+// React to the document's company on every doctype's form, live on field change.
+frappe.ui.form.on('*', {
+    refresh: function (frm) { thinkNXGPowerPack.CompanyBorder.applyFromForm(frm); },
+    company: function (frm) { thinkNXGPowerPack.CompanyBorder.applyFromForm(frm); }
+});
+
+// Clear the accent when navigating to a non-form route. Form destinations are
+// handled by the wildcard refresh above (which always sets the correct state for
+// the new form, including removal), so only non-form routes need clearing here.
+frappe.router.on('change', function () {
+    if ((frappe.get_route() || [])[0] !== 'Form') {
+        thinkNXGPowerPack.CompanyBorder._remove();
+    }
+});
+
+/**
+ * Show system health status
+ */
+thinkNXGPowerPack.checkHealth = function () {
+    frappe.call({
+        method: "thinknxg_powerpack.api.get_system_health",
+        callback: function (r) {
+            if (r.message) {
+                frappe.msgprint({
+                    title: __("System Health"),
+                    indicator: r.message.status === "healthy" ? "green" : "red",
+                    message: `Status: ${r.message.status}<br>Time: ${r.message.timestamp}`
+                });
+            }
+        }
+    });
+};
+
+/**
+ * PowerPack Settings Utilities with Caching
+ */
+thinkNXGPowerPack.Settings = {
+    _cache: {},
+
+    /**
+     * Get PowerPack Settings (cached)
+     * @param {Function} callback - Callback function receiving the settings object
+     */
+    get: function(callback) {
+        // Return cached settings if available
+        if (this._cache.settings) {
+            callback(this._cache.settings);
+            return;
+        }
+
+        // Fetch settings from server
+        frappe.call({
+            method: 'thinknxg_powerpack.api.get_settings_for_client',
+            callback: function(r) {
+                if (r.message) {
+                    thinkNXGPowerPack.Settings._cache.settings = r.message;
+                    callback(r.message);
+                } else {
+                    callback({});
+                }
+            }
+        });
+    },
+
+    /**
+     * Check if a specific feature is enabled
+     * @param {String} feature_name - Name of the feature field (e.g., 'enable_item_list_powerup')
+     * @param {Function} callback - Callback function receiving boolean (true/false)
+     */
+    isEnabled: function(feature_name, callback) {
+        this.get(function(settings) {
+            const enabled = settings[feature_name] === 1;
+            callback(enabled);
+        });
+    },
+
+    /**
+     * Clear the settings cache (call this when settings are updated)
+     */
+    clearCache: function() {
+        this._cache = {};
+    }
+};
+
+/**
+ * Item List Powerup Utilities
+ */
+thinkNXGPowerPack.ItemListPowerup = {
+    /**
+     * Check if Item List Powerup is enabled
+     * @param {Function} callback - Callback function receiving boolean
+     */
+    isEnabled: function(callback) {
+        thinkNXGPowerPack.Settings.isEnabled('enable_item_list_powerup', callback);
+    },
+
+    /**
+     * Add button only if Item List Powerup is enabled
+     * @param {Object} frm - The form object
+     * @param {String} label - Button label
+     * @param {Function} action - Button click handler
+     * @param {String} group - Optional button group
+     */
+    addButton: function(frm, label, action, group) {
+        this.isEnabled(function(enabled) {
+            if (!enabled) return;
+
+            if (group) {
+                frm.add_custom_button(__(label), action, __(group));
+            } else {
+                frm.add_custom_button(__(label), action);
+            }
+        });
+    }
+};
+
+// Clear cache when PowerPack Settings form is saved and re-apply border
+frappe.ui.form.on('PowerPack Settings', {
+    after_save: function(frm) {
+        thinkNXGPowerPack.Settings.clearCache();
+        thinkNXGPowerPack.CompanyBorder.applyFromForm(frm);
+        frappe.show_alert({
+            message: __('PowerPack Settings cache cleared'),
+            indicator: 'green'
+        }, 3);
+    }
+});
+
+/**
+ * Tax ID Duplicate Checker
+ */
+thinkNXGPowerPack.TaxIDChecker = {
+    /**
+     * Check if feature is enabled
+     * @param {Function} callback - Callback receiving boolean
+     */
+    isEnabled: function(callback) {
+        thinkNXGPowerPack.Settings.isEnabled('enable_duplicate_tax_id_check', callback);
+    },
+
+    /**
+     * Check for duplicate tax IDs and block save if found
+     * @param {Object} frm - The form object
+     * @param {String} doctype - 'Customer' or 'Supplier'
+     * @returns {Boolean} - Returns true to allow save, false to block
+     */
+    checkAndShowDialog: function(frm, doctype) {
+        const tax_id = frm.doc.tax_id;
+
+        // If no tax_id or user already confirmed, allow save
+        if (!tax_id || frm._tax_id_confirmed) {
+            return true;
+        }
+
+        // Check if feature is enabled (synchronous check from cache)
+        let feature_enabled = false;
+        thinkNXGPowerPack.Settings.get(function(settings) {
+            feature_enabled = settings.enable_duplicate_tax_id_check === 1;
+        });
+
+        // If feature disabled, allow save
+        if (!feature_enabled) {
+            return true;
+        }
+
+        // Check for duplicates synchronously
+        let has_duplicates = false;
+        let duplicates_data = null;
+
+        frappe.call({
+            method: 'thinknxg_powerpack.api.check_duplicate_tax_id',
+            args: {
+                doctype: doctype,
+                tax_id: tax_id,
+                current_name: frm.doc.name
+            },
+            async: false,  // Synchronous call to block save
+            callback: function(r) {
+                if (r.message && r.message.has_duplicates) {
+                    has_duplicates = true;
+                    duplicates_data = r.message.duplicates;
+                }
+            }
+        });
+
+        // If duplicates found, show dialog and block save
+        if (has_duplicates) {
+            thinkNXGPowerPack.TaxIDChecker.showConfirmationDialog(
+                frm,
+                duplicates_data,
+                doctype,
+                tax_id
+            );
+            return false;  // Block save
+        }
+
+        return true;  // Allow save
+    },
+
+    /**
+     * Show confirmation dialog with list of duplicates
+     * @param {Object} frm - The form object
+     * @param {Array} duplicates - List of duplicate records
+     * @param {String} doctype - 'Customer' or 'Supplier'
+     * @param {String} tax_id - The tax ID
+     */
+    showConfirmationDialog: function(frm, duplicates, doctype, tax_id) {
+        const title = doctype === 'Customer' ? __('Duplicate Customer Tax IDs') : __('Duplicate Supplier Tax IDs');
+        const name_label = doctype === 'Customer' ? __('Customer Name') : __('Supplier Name');
+
+        let html = `
+            <div style="margin-bottom: 15px;">
+                <p style="color: var(--text-muted); margin-bottom: 10px;">
+                    <strong style="color: var(--orange-500);">⚠ Warning:</strong>
+                    The Tax ID <strong>${tax_id}</strong> is already used by the following ${doctype.toLowerCase()}s:
+                </p>
+            </div>
+            <div style="max-height: 300px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 4px;">
+                <table class="table table-sm" style="margin-bottom: 0; font-size: 12px;">
+                    <thead style="position: sticky; top: 0; background: var(--subtle-fg); z-index: 1;">
+                        <tr>
+                            <th style="padding: 8px;">${doctype} ID</th>
+                            <th style="padding: 8px;">${name_label}</th>
+                            <th style="padding: 8px;">Date Created</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        `;
+
+        duplicates.forEach(dup => {
+            const date = frappe.datetime.str_to_user(dup.creation);
+            html += `
+                <tr>
+                    <td style="padding: 6px;">
+                        <a href="/app/${doctype.toLowerCase()}/${dup.name}" target="_blank" style="color: var(--text-color); font-weight: 500;">
+                            ${dup.name}
+                        </a>
+                    </td>
+                    <td style="padding: 6px;">${dup.display_name || ''}</td>
+                    <td style="padding: 6px; color: var(--text-muted);">${date}</td>
+                </tr>
+            `;
+        });
+
+        html += `
+                    </tbody>
+                </table>
+            </div>
+            <div style="margin-top: 15px; padding: 10px; background: var(--yellow-highlight-bg); border-left: 3px solid var(--yellow-500); border-radius: 4px;">
+                <p style="margin: 0; font-size: 12px; color: var(--text-color);">
+                    <strong>Note:</strong> Having multiple records with the same Tax ID may indicate duplicate entries.
+                </p>
+            </div>
+        `;
+
+        // Use confirm dialog with custom buttons
+        const d = new frappe.ui.Dialog({
+            title: title,
+            indicator: 'orange',
+            fields: [
+                {
+                    fieldtype: 'HTML',
+                    options: html
+                }
+            ],
+            primary_action_label: __('Save Anyway'),
+            primary_action: function() {
+                // Set flag to bypass check and save
+                frm._tax_id_confirmed = true;
+                d.hide();
+                frm.save();
+            },
+            secondary_action_label: __('Cancel'),
+            secondary_action: function() {
+                // Reset flag and close dialog
+                frm._tax_id_confirmed = false;
+                d.hide();
+            }
+        });
+
+        d.show();
+
+        // Add custom styling to make it stand out
+        d.$wrapper.find('.modal-content').css({
+            'border': '2px solid var(--orange-500)',
+            'box-shadow': '0 4px 20px rgba(255, 152, 0, 0.3)'
+        });
+    }
+};
+
+// Hook into Customer form
+frappe.ui.form.on('Customer', {
+    validate: function(frm) {
+        thinkNXGPowerPack.Warnings.checkEmptyTaxId(frm, 'Customer');
+        const allow_save = thinkNXGPowerPack.TaxIDChecker.checkAndShowDialog(frm, 'Customer');
+        if (!allow_save) {
+            frappe.validated = false;  // Block the save
+        }
+    },
+    after_save: function(frm) {
+        // Reset confirmation flag after successful save
+        frm._tax_id_confirmed = false;
+    }
+});
+
+// Hook into Supplier form
+frappe.ui.form.on('Supplier', {
+    validate: function(frm) {
+        thinkNXGPowerPack.Warnings.checkEmptyTaxId(frm, 'Supplier');
+        const allow_save = thinkNXGPowerPack.TaxIDChecker.checkAndShowDialog(frm, 'Supplier');
+        if (!allow_save) {
+            frappe.validated = false;  // Block the save
+        }
+    },
+    after_save: function(frm) {
+        // Reset confirmation flag after successful save
+        frm._tax_id_confirmed = false;
+    }
+});
+
+/**
+ * Warnings — Empty Tax ID and Customer Overdue Invoices
+ */
+thinkNXGPowerPack.Warnings = {
+    /**
+     * Show orange toast if Customer/Supplier is being saved with no Tax ID.
+     * Non-blocking — does not prevent the save.
+     * @param {Object} frm - The form object
+     * @param {String} doctype - 'Customer' or 'Supplier'
+     */
+    checkEmptyTaxId: function(frm, doctype) {
+        let enabled = false;
+        thinkNXGPowerPack.Settings.get(function(settings) {
+            enabled = settings.enable_warnings === 1;
+        });
+        if (!enabled) return;
+
+        if (!frm.doc.tax_id) {
+            frappe.show_alert({
+                message: __('Warning: {0} has no Tax ID set.', [frm.doc[doctype === 'Customer' ? 'customer_name' : 'supplier_name'] || frm.doc.name]),
+                indicator: 'orange'
+            }, 8);
+        }
+    },
+
+};
+
+/**
+ * Customer snapshot: an (i) icon next to Customer that opens a dialog with the
+ * customer's outstanding invoices, open payments, credit limit and contact.
+ * Red when overdue, amber when anything is pending, neutral when clean.
+ */
+thinkNXGPowerPack.CustomerInfo = {
+    ICON: '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>',
+
+    /**
+     * Put (or refresh) the icon next to a customer field and fetch the snapshot.
+     * @param {Object} frm
+     * @param {String} fieldname - 'customer' or 'party_name'
+     * @param {String} customer
+     * @param {Object} opts - { auto_open: Boolean } open the dialog by itself when overdue
+     */
+    attach: function(frm, fieldname, customer, opts) {
+        opts = opts || {};
+        const field = frm.get_field(fieldname);
+        if (!field || !field.$wrapper) return;
+        const $label = field.$wrapper.find('.control-label').first();
+        $label.find('.pp-customer-info').remove();
+        if (!customer) return;
+
+        thinkNXGPowerPack.Settings.isEnabled('enable_warnings', function(enabled) {
+            if (!enabled) return;
+            const $icon = $('<span class="pp-customer-info" title="' + __('Customer snapshot') + '"></span>').html(thinkNXGPowerPack.CustomerInfo.ICON);
+            $label.append($icon);
+            $icon.on('click', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                thinkNXGPowerPack.CustomerInfo.open(customer, frm.doc.company || '');
+            });
+            thinkNXGPowerPack.CustomerInfo.fetch(customer, frm.doc.company || '', function(snap) {
+                if (!snap) return;
+                $icon.removeClass('is-red is-amber');
+                if (snap.highlight) $icon.addClass('is-' + snap.highlight);
+                $icon.attr('title', snap.overdue_count
+                    ? __('{0} overdue invoice(s) \u2014 click for details', [snap.overdue_count])
+                    : snap.highlight ? __('Outstanding or advances pending \u2014 click for details') : __('Customer snapshot'));
+                if (opts.auto_open && snap.overdue_count > 0 && frm.doc.docstatus === 0) {
+                    thinkNXGPowerPack.CustomerInfo.render(snap);
+                }
+            });
+        });
+    },
+
+    fetch: function(customer, company, callback) {
+        frappe.call({
+            method: 'thinknxg_powerpack.api.get_customer_snapshot',
+            args: { customer: customer, company: company },
+            callback: function(r) { callback(r.message && r.message.customer ? r.message : null); }
+        });
+    },
+
+    open: function(customer, company) {
+        thinkNXGPowerPack.CustomerInfo.fetch(customer, company, function(snap) {
+            if (snap) thinkNXGPowerPack.CustomerInfo.render(snap);
+            else frappe.show_alert({ message: __('Customer snapshot is not available'), indicator: 'orange' }, 4);
+        });
+    },
+
+    render: function(snap) {
+        const cur = snap.currency;
+        const money = function(v) { return format_currency(v || 0, cur); };
+        const date = function(d) { return d ? frappe.datetime.str_to_user(d) : '\u2014'; };
+        const card = function(label, value, color) {
+            return '<div class="pp-snap-card"><div class="pp-snap-label">' + label + '</div>' +
+                '<div class="pp-snap-value"' + (color ? ' style="color:' + color + '"' : '') + '>' + value + '</div></div>';
+        };
+
+        const cards =
+            card(__('Total Outstanding'), money(snap.outstanding_total), snap.outstanding_total > 0 ? 'var(--red)' : 'var(--green)') +
+            card(__('Overdue'), (snap.overdue_count || 0) + ' \u00b7 ' + money(snap.overdue_total), snap.overdue_count ? 'var(--red)' : '') +
+            card(__('Unallocated Advances'), money(snap.advances_total), snap.advances_total > 0 ? 'var(--green)' : '') +
+            card(__('Credit Limit'), snap.credit_limit != null ? money(snap.credit_limit) : '\u2014');
+
+        const inv_rows = (snap.invoices || []).map(function(r) {
+            return '<tr>' +
+                '<td><a href="/app/sales-invoice/' + r.name + '" target="_blank">' + r.name + '</a></td>' +
+                '<td>' + date(r.posting_date) + '</td>' +
+                '<td>' + date(r.due_date) + '</td>' +
+                '<td class="r' + (r.days_overdue > 0 ? ' pp-overdue' : '') + '">' + (r.days_overdue || 0) + '</td>' +
+                '<td class="r">' + money(r.grand_total) + '</td>' +
+                '<td class="r">' + money(r.paid) + '</td>' +
+                '<td class="r pp-strong">' + money(r.outstanding_amount) + '</td></tr>';
+        }).join('');
+        const invoices = inv_rows
+            ? '<table class="pp-snap-table"><thead><tr><th>' + __('Invoice') + '</th><th>' + __('Date') + '</th><th>' + __('Due') + '</th><th class="r">' + __('Days overdue') + '</th><th class="r">' + __('Amount') + '</th><th class="r">' + __('Paid') + '</th><th class="r">' + __('Outstanding') + '</th></tr></thead><tbody>' + inv_rows + '</tbody></table>'
+            : '<div class="text-muted">' + __('No outstanding invoices') + '</div>';
+
+        const adv_rows = (snap.advances || []).map(function(a) {
+            return '<tr><td><a href="/app/payment-entry/' + a.name + '" target="_blank">' + a.name + '</a></td>' +
+                '<td>' + date(a.posting_date) + '</td><td class="r">' + money(a.paid_amount) + '</td>' +
+                '<td class="r pp-strong" style="color:var(--green)">' + money(a.unallocated_amount) + '</td></tr>';
+        }).join('');
+        const advances = adv_rows
+            ? '<table class="pp-snap-table"><thead><tr><th>' + __('Payment Entry') + '</th><th>' + __('Date') + '</th><th class="r">' + __('Paid') + '</th><th class="r">' + __('Unallocated') + '</th></tr></thead><tbody>' + adv_rows + '</tbody></table>'
+            : '<div class="text-muted">' + __('No open payments') + '</div>';
+
+        const c = snap.primary_contact;
+        let contact = '<span class="text-muted">' + __('No contact on file') + '</span>';
+        if (c) {
+            contact = '<strong>' + frappe.utils.escape_html(c.name || '') + '</strong>' +
+                (c.email ? ' \u00b7 <a href="mailto:' + c.email + '">' + c.email + '</a>' : '') +
+                (c.phone ? ' \u00b7 <a href="tel:' + c.phone + '">' + c.phone + '</a>' : '');
+        }
+        if (snap.payment_terms) contact += '<div class="text-muted">' + __('Payment Terms') + ': ' + snap.payment_terms + '</div>';
+
+        const html =
+            '<div class="pp-snap">' +
+            '<div class="pp-snap-cards">' + cards + '</div>' +
+            '<div class="pp-snap-section">' + __('Outstanding invoices') + '</div>' + invoices +
+            '<div class="pp-snap-section">' + __('Open payments') + '</div>' + advances +
+            '<div class="pp-snap-section">' + __('Contact') + '</div><div class="pp-snap-contact">' + contact + '</div>' +
+            '</div>';
+
+        const d = new frappe.ui.Dialog({
+            title: snap.customer_name || snap.customer,
+            indicator: snap.overdue_count ? 'red' : 'blue',
+            size: 'large',
+            fields: [{ fieldtype: 'HTML', fieldname: 'body', options: html }],
+            primary_action_label: __('Email Customer'),
+            primary_action: function() { thinkNXGPowerPack.CustomerInfo.email(snap); },
+            secondary_action_label: __('Copy to Clipboard'),
+            secondary_action: function() { thinkNXGPowerPack.CustomerInfo.copy(snap); }
+        });
+        d.add_custom_action(__('Copy as Image'), function() { thinkNXGPowerPack.CustomerInfo.copy_image(snap); });
+        // Keep the three statement actions together on the right, Close on its own.
+        d.custom_actions.find('button').last().addClass('mr-2').insertBefore(d.get_secondary_btn());
+        d.add_custom_action(__('Close'), function() { d.hide(); });
+        d.show();
+    },
+
+    // Copy, Email and Copy as Image format through the site's statement script
+    // ('Party Statement - Copy and Email', seeded by thinkNXG Reports), the same one
+    // Transaction History uses, so a site changes its columns in one place.
+    SCRIPT: 'Party Statement - Copy and Email',
+
+    // The shape the statement script takes, shared with Transaction History.
+    statement_snap: function(snap) {
+        return {
+            party_type: 'Customer',
+            party: snap.customer,
+            party_name: snap.customer_name || snap.customer,
+            company: snap.company || '',
+            as_of_date: frappe.datetime.get_today(),
+            currency: snap.currency,
+            invoices: (snap.invoices || []).map(function(r) {
+                return { name: r.name, posting_date: r.posting_date, due_date: r.due_date, days_overdue: r.days_overdue || 0,
+                    grand_total: r.grand_total, paid: r.paid, outstanding_amount: r.outstanding_amount };
+            }),
+            outstanding_total: snap.outstanding_total,
+            overdue_count: snap.overdue_count,
+            overdue_total: snap.overdue_total,
+            advances: (snap.advances || []).map(function(a) {
+                return { name: a.name, posting_date: a.posting_date, paid_amount: a.paid_amount, unallocated_amount: a.unallocated_amount };
+            }),
+            advances_total: snap.advances_total,
+            net_position: snap.net_position,
+            payment_terms: snap.payment_terms,
+            credit_limit: snap.credit_limit
+        };
+    },
+
+    // Resolves to thinknxg.party_statement. Fetched on every use so an edit applies without a
+    // reload. Every failure is reported here and rejects with `silent`.
+    statement: function() {
+        const CI = thinkNXGPowerPack.CustomerInfo;
+        const silent = function() { return Object.assign(new Error('party statement unavailable'), { silent: true }); };
+        return frappe.xcall('thinknxg_powerpack.api.get_party_statement_script')
+            .catch(function() { throw silent(); }) // frappe has already shown the server's error
+            .then(function(source) {
+                if (!source) {
+                    frappe.show_alert({ message: __("Statement script is missing or disabled: Client Script '{0}'", [CI.SCRIPT]), indicator: 'orange' }, 7);
+                    throw silent();
+                }
+                return CI.run(function() {
+                    if (window.thinknxg) delete window.thinknxg.party_statement; // never fall back to a stale copy
+                    new Function(source)();
+                    const ps = window.thinknxg && window.thinknxg.party_statement;
+                    if (!ps || typeof ps.text !== 'function' || typeof ps.image !== 'function') {
+                        throw new Error(__('The script did not register thinknxg.party_statement with text() and image().'));
+                    }
+                    return ps;
+                });
+            });
+    },
+
+    // Runs site-script code; a throw or rejection becomes a red message naming the script.
+    run: function(fn) {
+        const report = function(e) {
+            frappe.msgprint({
+                title: __('Statement script error'),
+                indicator: 'red',
+                message: __("Client Script '{0}' failed: {1}", [thinkNXGPowerPack.CustomerInfo.SCRIPT, frappe.utils.escape_html(String((e && e.message) || e))])
+            });
+            throw Object.assign(new Error('party statement failed'), { silent: true });
+        };
+        try { return Promise.resolve(fn()).catch(report); }
+        catch (e) { return Promise.reject(e).catch(report); }
+    },
+
+    // The clipboard write must start inside the click (Safari), so it is handed the
+    // pending text rather than waiting for the script to arrive.
+    copy: function(snap) {
+        const CI = thinkNXGPowerPack.CustomerInfo;
+        const text = CI.statement().then(function(ps) { return CI.run(function() { return ps.text(CI.statement_snap(snap)); }); });
+        let written;
+        try {
+            written = typeof ClipboardItem === 'undefined'
+                ? text.then(function(t) { return navigator.clipboard.writeText(t); })
+                : navigator.clipboard.write([new ClipboardItem({ 'text/plain': text.then(function(t) { return new Blob([t], { type: 'text/plain' }); }) })]);
+        } catch (e) {
+            written = Promise.reject(e);
+        }
+        written
+            .then(function() { frappe.show_alert({ message: __('Copied to clipboard'), indicator: 'green' }, 4); })
+            // A failure in `text` was reported already; only a refused clipboard is new.
+            .catch(function() { text.then(CI.manual_copy, function() {}); });
+    },
+
+    // The browser refused the clipboard (plain-http site, older browser, tab lost focus):
+    // show the text, selected, so the user can copy it by hand.
+    manual_copy: function(text) {
+        const d = frappe.msgprint({
+            title: __('Copy the statement'),
+            message: '<p class="text-muted">' + __('The browser did not allow copying. Press Ctrl+C (Cmd+C on a Mac) to copy the selected text.') + '</p>' +
+                '<textarea class="form-control party-statement-manual" readonly rows="14" style="font-family:var(--font-family-monospace, monospace);font-size:12px">' +
+                frappe.utils.escape_html(text) + '</textarea>'
+        });
+        // The dialog moves focus to itself once it has opened; select after that.
+        const select = function() { d.$wrapper.find('textarea.party-statement-manual').trigger('focus').trigger('select'); };
+        d.$wrapper.one('shown.bs.modal', function() { setTimeout(select, 50); });
+        setTimeout(select, 700);
+    },
+
+    copy_image: function(snap) {
+        const CI = thinkNXGPowerPack.CustomerInfo;
+        if (CI._image_busy) return;
+        CI._image_busy = true;
+        const png = CI.statement().then(function(ps) { return CI.run(function() { return ps.image(CI.statement_snap(snap)); }); });
+        let written;
+        try {
+            written = navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
+        } catch (e) {
+            written = Promise.reject(e);
+        }
+        written
+            .then(function() { frappe.show_alert({ message: __('Image copied'), indicator: 'green' }, 4); })
+            .catch(function() {
+                // The browser refused the image (older browser, or the tab lost focus): download it.
+                return png.then(function(blob) {
+                    thinknxg_powerpack.copy_as_image.download(blob, String(snap.customer_name || snap.customer).replace(/[\\:*?"<>|]+/g, '-') + ' statement');
+                    frappe.show_alert({ message: __('Could not copy the image, so it was downloaded instead'), indicator: 'orange' }, 6);
+                }, function() {});
+            })
+            .finally(function() { CI._image_busy = false; });
+    },
+
+    email: function(snap) {
+        const recipient = snap.primary_contact && snap.primary_contact.email ? snap.primary_contact.email : '';
+        const subject = __('Account statement \u2014 {0}: {1} outstanding', [snap.customer_name || snap.customer, format_currency(snap.outstanding_total || 0, snap.currency)]);
+        const CI = thinkNXGPowerPack.CustomerInfo;
+        CI.statement().then(function(ps) { return CI.run(function() { return ps.text(CI.statement_snap(snap)); }); }).then(function(text) {
+            new frappe.views.CommunicationComposer({
+                doc: { doctype: 'Customer', name: snap.customer },
+                subject: subject,
+                recipients: recipient,
+                message: '<pre style="font-family:inherit;white-space:pre-wrap">' + frappe.utils.escape_html(text) + '</pre>'
+            });
+        }).catch(function() {});
+    }
+};
+
+/**
+ * ETR Invoice Cancellation Prevention
+ * Shows informational dialog before server-side validation blocks cancellation
+ */
+thinkNXGPowerPack.ETRCancelBlock = {
+    showWarning: function(frm) {
+        thinkNXGPowerPack.Settings.get(function(settings) {
+            if (settings.prevent_etr_invoice_cancellation === 1 && frm.doc.etr_invoice_number) {
+                frappe.msgprint({
+                    title: __('ETR Invoice Cannot Be Cancelled'),
+                    indicator: 'red',
+                    message: __('This document contains an ETR Invoice Number: <strong>{0}</strong><br><br>ETR registered invoices cannot be cancelled for tax compliance reasons.<br><br>The cancellation will be blocked by the system.',
+                        [frm.doc.etr_invoice_number])
+                });
+            }
+        });
+    }
+};
+
+// Hook into Sales Invoice
+frappe.ui.form.on('Sales Invoice', {
+    before_cancel: function(frm) {
+        thinkNXGPowerPack.ETRCancelBlock.showWarning(frm);
+    }
+});
+
+// Hook into POS Invoice
+frappe.ui.form.on('POS Invoice', {
+    before_cancel: function(frm) {
+        thinkNXGPowerPack.ETRCancelBlock.showWarning(frm);
+    }
+});
+
+/**
+ * ETR Invoice Number helpers for Purchase Invoice
+ * Gated by enable_warnings in PowerPack Settings.
+ */
+thinkNXGPowerPack.ETRInvoice = {
+
+	// TIMS:  exactly 19 digits
+	// eTIMS: KRACU + any word chars (taxpayer code) + / + digits
+	_REGEX: /^\d{19}$|^KRACU\w+\/\d+$/,
+
+	isValid(value) {
+		return !value || this._REGEX.test(value);
+	},
+
+	// Determine verification URL based on format
+	_verifyUrl(etr) {
+		const is_tims = /^\d{19}$/.test(etr);
+		if (is_tims) {
+			return `https://itax.kra.go.ke/KRA-Portal/invoiceChk.htm?actionCode=loadPage&invoiceNo=${etr}`;
+		}
+		// eTIMS — replace all slashes with hyphens for the URL
+		return `https://etims.kra.go.ke/common/link/etims/receipt/indexEtimsInvoiceData?Data=${etr.replace(/\//g, '-')}`;
+	},
+
+	setupFieldValidation(frm) {
+		const fd = frm.fields_dict.etr_invoice_number;
+		if (!fd || !fd.$input) return;
+
+		// Inject validation message element once
+		if (!fd.$wrapper.find('.etr-validation-msg').length) {
+			fd.$wrapper.append('<div class="etr-validation-msg" style="color:var(--red-500);font-size:11px;margin-top:2px;"></div>');
+		}
+
+		fd.$input.off('input.etr').on('input.etr', function () {
+			const val  = $(this).val();
+			const $msg = fd.$wrapper.find('.etr-validation-msg');
+			const ok   = !val || thinkNXGPowerPack.ETRInvoice._REGEX.test(val);
+			$msg.text(ok ? '' : __('Invalid TIMS/eTIMS format ({0} chars)', [val.length]));
+			$(this).toggleClass('is-invalid', !ok);
+		});
+	},
+
+	setupButtons(frm) {
+		const fd = frm.fields_dict.etr_invoice_number;
+		if (!fd) return;
+
+		// Dedup — remove any previously injected container on each refresh
+		fd.$wrapper.find('.etr-action-buttons').remove();
+
+		const $container = $(`
+			<div class="etr-action-buttons" style="margin-top:5px;display:flex;gap:8px;">
+				<button class="btn btn-xs btn-primary btn-verify">${__('Verify')}</button>
+				<button class="btn btn-xs btn-default btn-last-cuin">${__('Get Last CU INV')}</button>
+			</div>`);
+
+		fd.$wrapper.find('.control-input-wrapper').after($container);
+		$container.find('.btn-verify').on('click', () => thinkNXGPowerPack.ETRInvoice.verify(frm));
+		$container.find('.btn-last-cuin').on('click', () => thinkNXGPowerPack.ETRInvoice.getLastCUIN(frm));
+	},
+
+	verify(frm) {
+		const etr = frm.doc.etr_invoice_number;
+		if (!etr) {
+			frappe.show_alert({ message: __('Please fill the ETR Invoice Number first.'), indicator: 'red' });
+			return;
+		}
+		window.open(this._verifyUrl(etr));
+	},
+
+	getLastCUIN(frm) {
+		if (frm.doc.etr_invoice_number) {
+			frappe.show_alert({ message: __('ETR Invoice Number already has a value.'), indicator: 'orange' });
+			return;
+		}
+		if (!frm.doc.supplier) {
+			frappe.show_alert({ message: __('Please select a Supplier first.'), indicator: 'orange' });
+			return;
+		}
+		frappe.call({
+			method: 'frappe.client.get_list',
+			args: {
+				doctype: 'Purchase Invoice',
+				fields: ['etr_invoice_number'],
+				filters: {
+					supplier: frm.doc.supplier,
+					etr_invoice_number: ['!=', ''],
+				},
+				order_by: 'creation desc',
+				limit: 1,
+			},
+			callback(r) {
+				if (r.message?.length && r.message[0].etr_invoice_number) {
+					frm.set_value('etr_invoice_number', r.message[0].etr_invoice_number);
+				} else {
+					frappe.msgprint({
+						title: __('Not Found'),
+						indicator: 'orange',
+						message: __('No ETR Invoice Number found on previous invoices for this supplier.'),
+					});
+				}
+			},
+		});
+	},
+};
+
+frappe.ui.form.on('Purchase Invoice', {
+	onload(frm) {
+		thinkNXGPowerPack.Settings.isEnabled('enable_warnings', enabled => {
+			if (!enabled) return;
+			thinkNXGPowerPack.ETRInvoice.setupFieldValidation(frm);
+		});
+	},
+
+	refresh(frm) {
+		thinkNXGPowerPack.Settings.isEnabled('enable_warnings', enabled => {
+			if (!enabled) return;
+			thinkNXGPowerPack.ETRInvoice.setupButtons(frm);
+		});
+	},
+
+	bill_date(frm) {
+		thinkNXGPowerPack.Settings.isEnabled('enable_warnings', enabled => {
+			if (!enabled || !frm.doc.bill_date) return;
+			const today = frappe.datetime.get_today();
+			if (frm.doc.bill_date > today) {
+				frappe.show_alert({
+					message: __('Bill Date is in the future. Please check — a Purchase Invoice cannot be dated after today.'),
+					indicator: 'orange'
+				}, 10);
+			}
+		});
+	},
+
+	before_submit(frm) {
+		// Wrap in a Promise so thinkNXG waits for user decision before proceeding
+		return new Promise((resolve, reject) => {
+			thinkNXGPowerPack.Settings.isEnabled('enable_warnings', enabled => {
+				if (!enabled || frm.doc.etr_invoice_number) {
+					resolve();
+					return;
+				}
+				frappe.confirm(
+					__('The ETR Invoice Number is empty. Submit anyway?'),
+					resolve,
+					() => {
+						frappe.show_alert({ message: __('Please fill the ETR Invoice Number.'), indicator: 'orange' });
+						frm.scroll_to_field('etr_invoice_number');
+						reject();
+					}
+				);
+			});
+		});
+	},
+});
+
+// Customer snapshot icon on sales documents
+['Sales Order', 'Sales Invoice', 'Delivery Note'].forEach(function(doctype) {
+    frappe.ui.form.on(doctype, {
+        refresh: function(frm) {
+            thinkNXGPowerPack.CustomerInfo.attach(frm, 'customer', frm.doc.customer, { auto_open: false });
+        },
+        customer: function(frm) {
+            thinkNXGPowerPack.CustomerInfo.attach(frm, 'customer', frm.doc.customer, { auto_open: true });
+        }
+    });
+});
+
+frappe.ui.form.on('Quotation', {
+    refresh: function(frm) {
+        const customer = frm.doc.quotation_to === 'Customer' ? frm.doc.party_name : '';
+        thinkNXGPowerPack.CustomerInfo.attach(frm, 'party_name', customer, { auto_open: false });
+    },
+    party_name: function(frm) {
+        const customer = frm.doc.quotation_to === 'Customer' ? frm.doc.party_name : '';
+        thinkNXGPowerPack.CustomerInfo.attach(frm, 'party_name', customer, { auto_open: true });
+    }
+});

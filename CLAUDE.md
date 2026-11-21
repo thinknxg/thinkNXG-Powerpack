@@ -1,0 +1,340 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Overview
+
+thinkNXG PowerPack is a thinkNXG/ERPNext app that adds feature enhancements ("power-ups") to thinkNXG ERP. All features are centrally toggled via a single `PowerPack Settings` DocType (singleton).
+
+## Common Commands
+
+All commands run from `/home/frappeuser/frappe-bench/`:
+
+```bash
+# Build JS/CSS assets after editing public/ files
+bench build --app thinknxg_powerpack
+
+# Migrate after changing DocType JSON
+bench migrate
+
+# Run all app tests
+bench run-tests --app thinknxg_powerpack
+
+# Run a single test module
+bench run-tests --app thinknxg_powerpack --module thinknxg_powerpack.thinknxg_powerpack.doctype.powerpack_settings.test_powerpack_settings
+
+# Restart after Python changes
+bench restart
+
+# Clear cache
+bench clear-cache
+```
+
+## Architecture
+
+### Feature Gating Pattern
+
+Every feature is controlled by a checkbox field in `PowerPack Settings`. The pattern is used consistently on both sides:
+
+**Python (server):**
+```python
+from thinknxg_powerpack.utils import is_feature_enabled
+if not is_feature_enabled('enable_some_feature'):
+    return
+```
+
+**JavaScript (client):**
+```javascript
+thinkNXGPowerPack.Settings.isEnabled('enable_some_feature', function(enabled) {
+    if (!enabled) return;
+    // feature logic
+});
+```
+
+The JS settings object (`thinkNXGPowerPack.Settings`) caches settings in memory and is cleared `after_save` on the PowerPack Settings form.
+
+**Never read PowerPack Settings from the client with `frappe.client.get` / `get_single_value` / `get_value`.** Those permission-check the singleton, and `frappe.permissions.has_user_permission()` walks the Link fields of its *child* rows — so one User Permission on Item Group or Company makes the whole singleton unreadable and every gated feature dies with "No permission for PowerPack Settings". Go through `thinkNXGPowerPack.Settings.get()` / `.isEnabled()`, which call `thinknxg_powerpack.api.get_settings_for_client`. Any new Link field on a Settings child table needs `"ignore_user_permissions": 1`, since those rows are configuration, not scoped data.
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `thinknxg_powerpack/hooks.py` | App metadata, `app_include_js/css`, `doc_events`, `override_doctype_class`, `fixtures` |
+| `thinknxg_powerpack/api.py` | All `@frappe.whitelist()` API methods |
+| `thinknxg_powerpack/utils.py` | `get_powerpack_settings()`, `is_feature_enabled()` |
+| `thinknxg_powerpack/validations.py` | `before_cancel` handler for ETR invoice protection |
+| `thinknxg_powerpack/overrides.py` | `Payment Reconciliation` validate hook for zero-allocation support |
+| `thinknxg_powerpack/custom_payment_reconciliation.py` | `CustomPaymentReconciliation` class extending thinkNXG ERP's `PaymentReconciliation` |
+| `thinknxg_powerpack/sales_insights.py` | Sales Powerup data: one call for all rows, values normalised to company currency / ex tax / per stock UOM; cost fields withheld server-side without `sales_visible_to_role` |
+| `thinknxg_powerpack/copy_as_image.py` | Copy as Image: renders the print PDF as one page MAX_PAGES tall (so a long items table never breaks) to a PNG (pypdfium2) for `public/js/copy_as_image.js`, which writes it to the clipboard from the Powerup menu on the form and on the print preview |
+| `thinknxg_powerpack/kenya_withholding.py` | Kenya withholding at supplier payment: Payment Entry rows/deductions/paid amount, due dates, Pay KRA, iTax CSV, custom field setup. See **Kenya Withholding** |
+| `thinknxg_powerpack/rate_price_picker.py` | Rate Price Picker data: an item's price per selling list via thinkNXG ERP's `get_price_list_rate_for` (pass `qty`, or it drops an exact-UOM match), plus a below-floor flag from `min_selling_price.row_floor` - never the floor itself |
+| `thinknxg_powerpack/branch_naming.py` | Naming-series placeholders (`.CO.` `.BR.` `.SET.` `.PAYDIR.` `.ST.` `.RET.`, plus `/ - _` forms that drop their separator when blank) via `naming_series_variables`, gated by `enable_branch_naming_codes`. `.CO.` is left out when the Company has no Naming Code (no Abbr fallback). `SUGGESTED_SERIES` + `apply_suggested_series` back Settings > Apply suggested naming, which needs the company name typed exactly and also fills each blank warehouse Naming Code (`suggest_code`: GIT for Transit, else initials, numbered on a clash; set codes are never changed) |
+| `thinknxg_powerpack/permission_manager.py` | Server side of the Permission Manager page: read all rules, preview/commit a batched change set |
+| `thinknxg_powerpack/thinknxg_powerpack/page/powerpack_permissions/` | The Permission Manager desk page (`/app/powerpack-permissions`) |
+| `thinknxg_powerpack/thinknxg_powerpack/doctype/powerpack_settings/` | Singleton DocType definition |
+
+### Asset bundling (read before adding a JS or CSS file)
+
+`hooks.py` declares exactly two desk assets, and they are **bare bundle names**, not
+`/assets/...` paths:
+
+```python
+app_include_css = "thinknxg_powerpack.bundle.css"   # built from public/css/thinknxg_powerpack.bundle.scss
+app_include_js  = "thinknxg_powerpack.bundle.js"    # public/js/thinknxg_powerpack.bundle.js
+```
+
+thinkNXG resolves a bundle name through `assets.json` to a **content-hashed** filename
+(`bundled_asset()`, `frappe/utils/jinja_globals.py:147`). A literal `/assets` path is
+served verbatim with no hash and no `?ver=`, so browsers cache it indefinitely and a
+deployed change never reaches anyone who does not manually hard-reload. Never go back
+to listing raw paths.
+
+**To add a file:** create it under `public/js` or `public/css`, then add an `import`
+to the matching bundle entry point. Import order is load order.
+
+Two consequences to respect:
+
+- **CSS sources are `.scss`.** Most are plain CSS with a renamed extension; Sass nesting is fine and `powerpack_permissions.scss` uses it. The
+  rename exists only so sass resolves the bundle's extensionless sibling imports —
+  frappe's postcss plugin copies a bundle entry to a temp dir without its siblings,
+  so importing a `.css` file by full name fails to resolve.
+- **Bundled files get module scope, not global scope.** A top-level `function foo()`
+  in a bundled file is NOT on `window`. Anything shared between files must go on
+  `window.thinkNXGPowerPack` or a `frappe.provide()` namespace — see
+  `thinkNXGPowerPack.formatNumber`, which was previously a bare `format_number()` in
+  `bulk_selection.js` that silently overwrote frappe's core `window.format_number`
+  for every desk page.
+
+Known quirk: the CSS hash changes on every `bench build` even with no source change,
+because frappe stages CSS through a randomly-named temp dir that lands in the
+sourcemap. Harmless (one extra ~32KB download per deploy) and not specific to this
+app. The JS hash is stable.
+
+**Public JS files** (all bundled via `thinknxg_powerpack.bundle.js`):
+- `thinknxg_powerpack.js` — `thinkNXGPowerPack` namespace, settings cache, Tax ID duplicate check, ETR cancel warning, `addHelp(frm, slug)` (Powerup ▾ > Help; Payment Entry lists kenya-withholding and kenya-withholding-deposits → `https://thinknxg.com/walkthroughs/<slug>`; one Help per form, which lists the walkthroughs when a form registers several; titles in `WALKTHROUGH_TITLES`), the slug map `WALKTHROUGH_SLUGS`, and a table adding Help for features with no hook of their own (tour, min selling price, rate picker, copy, zero allocate, duplicate PIN)
+- `sales_powerup.js` — Item Insights (stock, cost, purchase/sale history, margin badge, profit summary) on Quotation/SO/SI/POS Invoice; toggled from Powerup ▾. One batched call to `sales_insights.get_sales_item_insights` for all rows, cached 5 min per (company, customer, item, warehouse); renders are debounced
+- `bulk_selection.js` — Bulk item selection dialog for sales documents
+- `profit_calculator.js` — Pure margin maths (Node tests in `tests/js/`, run by `test_profit_calculator_js.py`). One basis: company currency, ex tax, `base_net_rate` vs `valuation_rate × conversion_factor`; margin = profit ÷ net sale regardless of tax template
+- `copy_as_image.js` — Copy as Image on QT/SO/SI/PO forms and print preview. Patches `frappe.ui.form.PrintView` through a property setter, because the print page defines that class after the bundle loads. The print preview's Powerup also carries the site's Copy as Message Client Script: `copy_as_message.get_copy_message_script` hands over the source and `collect_copy_message` runs it against a stub frm, intercepting only `frappe.ui.form.on`, so the script's own guards decide visibility
+- `lens_powerup.js` — Lens (the icon beside a row's pencil): stock, history, price lists. On Purchase Order, Purchase Receipt and Purchase Invoice it also sets selling prices: the lists that already price the item, a blank row for the default selling list on a new item, and a + on the Price Lists header (a dropdown) for any other enabled selling list (`get_lens_data` returns `addable_price_lists`); Save Prices calls `update_item_prices`. Margin is against the valuation rate, or this row's buying rate per stock unit when the item has none yet
+- `rate_price_picker.js` — Rate Price Picker dropdown on the items grid Rate. Keys and the read-only cell are handled in the capture phase: frappe's grid navigation (Up/Down/Enter) and a disabled input's swallowed clicks otherwise win. Custom Price availability comes from the document state, not the grid DOM, which may be mid-redraw
+- `payment_reconciliation_powerup.js` — "Zero Allocate" button for Payment Reconciliation
+- `kenya_withholding_payment_entry.js` / `kenya_withholding_journal_entry.js` — **not bundled**: loaded through `doctype_js` in `hooks.py` (Payment Entry, Journal Entry). The JE script skips Payment Entry in Cancel All for a KRA payment
+
+### Server-Side Extension Points
+
+- **`override_doctype_class`** in `hooks.py`: `Payment Reconciliation` is overridden with `CustomPaymentReconciliation` to add a `zero_reconcile()` method without touching the standard reconcile path.
+- **`doc_events`**: `before_cancel` on Sales Invoice and POS Invoice; `validate` on Payment Reconciliation.
+- **`doc_events`** (Kenya withholding): Payment Entry `before_validate` (`apply_to_payment_entry`) and `before_cancel` (`prevent_cancel_if_paid_to_kra`); Journal Entry `onload` (`flag_kra_payment`), `before_insert` (`refuse_kra_amend`), `before_cancel` (`allow_cancel_of_kra_payment`) and `on_cancel` (`clear_kra_link`).
+
+### Kenya Withholding
+
+Withholding (2% VAT WHT, 7.5% rent, 5% professional) is computed on a supplier Payment Entry, gated by
+`enable_kenya_withholding`. Config is the Settings Withholding tab: rules, VAT accounts, VAT WHT exemptions.
+Spec: `docs/superpowers/specs/2026-10-16-kenya-withholding-at-payment-design.md`.
+
+- **All matching rules stack** (blank item = any item, blank supplier = any supplier). Whether a rule is VAT or
+  income tax is decided only by its account being in the `withholding_vat_accounts` list. An exemption skips VAT
+  rules only, while `posting_date <= valid_until`. `thinknxg_skip_withholding` ("Skip Withholding", a Check under Apply
+  TDS, shown on supplier payments) does the same for one Payment Entry.
+- **Deduction rows are negative** amounts. The paid amount is derived (allocations minus withheld, plus other
+  deductions) and read-only; no unallocated/advance amount alongside withholding.
+- **Amounts use `Decimal` and `ceil` per (invoice, rule)** to match iTax (266,200 x 7.5% = 19,965, never float 19,966).
+  Base = `round(sum(matching lines' base_net_amount) x allocated / total, 2)`, total = the invoice's rounded (else
+  grand) total, then `ceil(base x rate / 100)` in Decimal. `allocated` is summed over all reference rows of one
+  invoice first (an invoice with payment terms has one row per term; a ceil per row would over-withhold).
+- The PE hook is `before_validate`, so it **also runs at submit** and recomputes with the rules in force then.
+  When the entry stops qualifying (feature off, no rules for its company, not Pay to a Supplier) it clears the
+  rows it holds and their deductions instead of submitting them. Deductions on rule accounts are taken over only
+  when the entry has withholding now or held some before; otherwise they are the user's own and are left.
+- The form script previews via `compute_for_payment_entry` (write permission on Payment Entry and read on each
+  referenced Purchase Invoice) only for users who can write, and only with the feature on, unless the draft
+  already holds rows (so the server clears them). It writes only what differs from the form (`add_child`
+  dirties it, and a dirty draft never shows Submit), keeps the user's own deduction rows as the same objects,
+  and re-runs on deduction edits.
+- Rows live in the `thinknxg_withholding` custom field (child `Payment Entry Withholding`, created by
+  `setup_custom_fields` on install and migrate). The custom field is on **every site's** Payment Entry, read-only,
+  shown as "Withholding Details", whether or not the feature is on. VAT due = 5 working days after posting (Sat/Sun and the company
+  holiday list skipped); income tax due = 20th of the next month.
+- **`merge_vat_rows`** is shared by Pay KRA and the iTax CSV: VAT rows merged by (PIN, invoice no), base summed,
+  and it **refuses mixed rates** on one key. Pay KRA credits the bank with the ceil of each merged invoice (the PRN
+  figure) and books the difference to the Company round-off account. The Pay KRA dialog shows that bank figure,
+  from `pay_kra_preview`, which also refuses a bad selection before a PRN is typed.
+- Pay KRA **refuses a selection mixing VAT and income-tax rows**: separate iTax returns, separate PRNs.
+- A KRA Journal Entry is marked by the hidden Check `thinknxg_kra_payment` (custom field on Journal Entry, set by
+  `pay_kra`). `flag_kra_payment` and `allow_cancel_of_kra_payment` read it. **Amending a cancelled KRA JE is
+  refused** (`refuse_kra_amend`): cancel already put its rows back to Unpaid, so an amendment would pay them twice.
+  Run Pay KRA again from the report. thinkNXG copies `no_copy` fields on Amend (not on Duplicate), so the check is on
+  `amended_from`'s marker.
+- `pay_kra` and `export_itax_csv` are POST only; the report downloads the CSV with `open_url_post`. The CSV refuses
+  a selection with no VAT rows, and a blank or whitespace PIN counts as missing. The report runs those refusals
+  first through `check_itax_export` (frappe.call), since in the download tab they would be a bare 417 page.
+- `kra_journal_entry` on the withholding row is written with `db.set_value` after the Journal Entry submits, so
+  the submitted Payment Entry is never re-saved. Cancelling that JE clears it (`clear_kra_link`). Desk "Cancel All"
+  would try to cancel the linked Payment Entry, hence the JE form script and `ignore_linked_doctypes`.
+- Report `Withholding Due to KRA`, Pay KRA and the CSV work with the feature off.
+- The Payment Entry script adds `Powerup ▾ > Help` (the kenya-withholding walkthrough) when the feature is on; it guards on `thinkNXGPowerPack.addHelp`, since doctype_js loads outside the bundle.
+- The report's summary cards (`account_cards`) sum the unpaid rows shown per account (red if any is overdue). The
+  last card, Selected, is rewritten in the browser on every row tick (`onCheckRow`). The Pay KRA button is labelled
+  **Issue Payment**; the server method is still `pay_kra`.
+- `setup_custom_fields` also sets a Property Setter on **every** Payment Entry: `section_break_14` (References,
+  Get Outstanding Invoices) shows once party and accounts are set, not only after a paid amount is typed. thinkNXG ERP
+  fills an empty paid amount from the fetched invoices. With withholding on (Pay/Supplier), the form script zeroes
+  a typed paid amount before Get Outstanding Invoices, so each invoice gets its full outstanding.
+- `thinknxg_total_withheld` ("Withheld", read-only, beside Paid Amount, hidden at 0) is the sum of the withholding
+  rows, so paid + withheld = allocated while picking invoices. `setup_custom_fields` backfills it from the rows.
+- Save/submit refuse a withholding entry whose paid amount comes out <= 0 (e.g. allocated 1: two ceils = 2). The
+  preview (`preview=True`) skips that check, since it runs while an allocation is still being typed.
+- **Deposits.** A Purchase Order reference withholds like an invoice (PO lines, PO total). Its rows carry
+  `purchase_order` and `allocated_amount` (the PO allocation they cover) and no invoice: "waiting". When thinkNXG ERP sets
+  the deposit against an invoice it re-saves the submitted entry, which runs only `before_update_after_submit`;
+  `link_deposit_rows` there takes the newly covered amount per (invoice, `advance_voucher_no`) as now minus
+  `get_doc_before_save()` (the entry may also have paid that invoice directly), carves it from that PO's waiting rows
+  with `split_row` (parts always sum to the row) and fills invoice, bill no and date. Amount from unallocated (no
+  `advance_voucher_no`) falls back to POs on the invoice's items. Deductions and GL are never touched.
+- A Purchase Invoice cancel (`before_cancel`) is refused if a deposit row linked to it was paid to KRA; otherwise
+  `on_cancel` merges its deposit rows back into the waiting row of the same entry, PO and account. thinkNXG ERP unlinks
+  with raw updates and never saves the entry, so these are `frappe.db` writes.
+- `_load_rows` refuses waiting rows, so Pay KRA, its preview and the iTax CSV only file invoice-linked rows. The report
+  shows their PO and "Awaiting invoice" (display only). A linked deposit row and the balance payment's row for the same
+  invoice merge into one iTax line.
+- Unreconcile Payment (`before_submit` refuses if paid to KRA; `on_submit`) puts the unreconciled invoice's deposit rows
+  of that entry back to waiting, like a cancel. With `advance_voucher_no` set, rows are carved only from that PO.
+- **Release Withholding** (report button, Accounts Manager / System Manager; `release_withholding`) is for a deposit
+  that will never get an invoice (PO closed, deposit refunded). Waiting rows only, one supplier and one company, a
+  reason required. It submits a Journal Entry (hidden Check `thinknxg_wht_release`): debit each withholding account,
+  credit the supplier on the deposit's `paid_to` (refused if that is not in company currency), and sets the rows'
+  `released_by`. Released rows are never linked, paid or exported, are not merge targets on unlink, sit under the
+  report's Released status and out of the cards. Cancelling the JE clears `released_by` (back to waiting); amending it
+  is refused; the deposit Payment Entry cannot be cancelled while it stands. Its posting date cannot be before the
+  deposit's. If the invoice comes after all, cancel the release before setting the deposit against it: cancelling it
+  once the entry holds that PO's invoice reference is refused (`link_deposit_rows` has already run; unreconcile first). The KRA payment JE hooks
+  (`flag_kra_payment`, `refuse_kra_amend`, `allow_cancel_of_kra_payment`, `clear_kra_link`) handle both kinds.
+- Deploying needs `bench migrate` (custom field, child DocTypes, Settings fields, report) and
+  `bench build --app thinknxg_powerpack`.
+
+### Permission Manager
+
+`/app/powerpack-permissions` replaces the per-checkbox saving of frappe's Role
+Permissions Manager with one virtualized grid and a single commit. Rules are keyed by
+`(doctype, role, permlevel, if_owner)` — `if_owner` included, because frappe's own
+`update_permission_property()` omits it and can hit the wrong row.
+
+- Read: gated on `frappe.has_permission("User Permission", "read")` (`READ_GATE_DOCTYPE`). Not
+  Custom DocPerm: frappe never honours custom perms on that doctype itself (`meta.py:645`).
+  Grant a role Read on User Permission to let it view the grid.
+- Write: `only_for("System Manager")`, unconditionally.
+- Stricter than frappe's page on purpose: the engine validates the rules actually in force
+  (the custom rows), whereas frappe's page validates the *standard* rows. A doctype whose
+  custom rows already break an invariant (e.g. submit/cancel/amend ticked on a
+  non-submittable doctype — dev has one: `API Request Log` / `Express Admin`) rejects
+  *any* commit touching it until those flags are cleared in the same commit. The error
+  names the offending rule.
+- Commit groups changes by doctype, calls `setup_custom_perms` once per doctype (which
+  **detaches** it from app permission updates — the review step lists these), validates
+  the custom rules with frappe's `validate_permissions()`, and clears the user cache once.
+- The payload is a list of ops: `{op: "update"|"add"|"remove", doctype, role, permlevel,
+  if_owner}`, plus `changes: {flag: 0|1}` for an update. A missing `op` means `update`.
+  `_parse_changes` is the only validation gate; `commit_changes` applies removals, then
+  additions, then updates per doctype so an update can target a rule the same payload
+  adds. A new rule is seeded `read: 1` and nothing else — `_add_rule` sets every flag in
+  `FLAGS` explicitly, because `Custom DocPerm` defaults `export` to `'1'` as well as
+  `read`, so passing `read` alone would silently grant Export on every rule the page creates.
+- Three invariants frappe enforces only in its **page endpoint**, never in
+  `validate_permissions()`, so this path enforces them itself: a doctype must keep at
+  least one rule (checked per doctype across the whole payload — row-by-row would let
+  you delete both rules of a two-rule doctype); no duplicate
+  `(doctype, role, permlevel, if_owner)`; and `report` cannot be set with `if_owner`.
+  `frappe.permissions.add_permission()` is deliberately unused — it `msgprint`s and
+  returns on a duplicate, and hardcodes `if_owner=0`.
+- A fourth invariant, `BASIC_RIGHTS`, frappe *does* enforce — but in
+  `validate_permissions()`, which `_apply_to_doctype` runs only after every row is
+  written, so one stray checkbox rolls the whole commit back with
+  "<rule>: No basic permissions set" and no hint which rule or flag caused it. A rule
+  needs one of `select` / `read` / `write` / `create` / `submit` / `cancel`; `delete`,
+  `print` or `export` alone does not count. Enforced twice on purpose:
+  `_check_keeps_a_basic_right` in `_parse_changes` (which reads the rule in force and
+  applies the payload's deltas, so read-off-plus-write-on is correctly allowed), and
+  `set_flag` in the browser, which refuses the click and puts the tick back. The
+  commonest way in is unticking Read on a rule you just added, since a new rule starts
+  with Read and nothing else. `test_the_guard_matches_frappe_own_predicate` fails if
+  frappe ever changes the predicate, rather than letting the two drift.
+- Adds and removes are staged in the browser (`pending_adds` / `pending_removes`) and
+  render as `pp-new` / `pp-removed`. Like flag edits, they reach the server only on
+  Commit and are dropped by Discard.
+- The header is **Actions | Review | Commit**. Add Rule, Remove Selected, Restore
+  Selected and Discard are items in the Actions dropdown, built once by
+  `make_actions_menu()` — `page.add_custom_button_group()` appends a new group on every
+  call and `render()` runs on every page load, so the group and its items live on the
+  instance. Each item is added with `standard: true`, which appends in the order
+  written; falsy inserts each above a divider and reverses them.
+  `add_custom_menu_item()` returns the `<a>`, so the toggles in `update_footer` act on
+  `.parent()`. Add Rule and Remove Selected always apply and never toggle.
+- A staged removal is undoable on its own: **Restore Selected** (shown only while
+  `pending_removes` is non-empty, like Discard) clears the mark for the selected rows.
+  Without it the only undo was Discard, which throws away every other unsaved change
+  too. `stage_remove` re-selects the rows it just staged (`reselect`), because
+  `apply_filters` drops the datatable's index-keyed checkbox map — otherwise the rows
+  needing restoring are exactly the ones no longer selected. A restored row comes back
+  as it was *loaded*: `stage_remove` restores its loaded flags and forgets its pending
+  edits (it must, or the payload emits an update and a remove for one identity), so it
+  says how many edits it dropped at the moment that is still true.
+- The dirty-flag marker is `input.pp-flag.pp-dirty`, qualified that far on purpose:
+  frappe's `input[type="checkbox"]:checked` sets `box-shadow: none; border: none` at
+  specificity (0,2,1), so the old `.pp-perm-table .pp-dirty` at (0,2,0) never applied to
+  a **ticked** box — only cleared flags looked edited. A ring, not a fill, carries the
+  signal, since a ticked box keeps frappe's own background and checkmark; the empty-box
+  wash uses `background-color`, never the `background` shorthand, which would reset
+  `background-image` and erase that checkmark. Do not reach for `--yellow-50`: it is
+  #fffcef, and frappe does not remap the raw yellow scale for dark mode (`desk/dark.scss`
+  redefines only the semantic `--bg-yellow` / `--alert-*-warning` tokens), so a near-white
+  value is washed out in both themes.
+- The page JS is loaded by frappe's page loader and is a classic script; its SCSS goes
+  through the bundle like everything else.
+- Deploying this feature needs `bench migrate` (it ships a new Page record — the route
+  404s without it) and `bench build --app thinknxg_powerpack` (new bundle entry;
+  `public/dist` is gitignored).
+
+### Fixtures
+
+`hooks.py` exports these as fixtures (synced with `bench export-fixtures`):
+- `Custom Field` — specifically `Quotation-set_warehouse`
+- `Server Script` and `Client Script` — all in the `thinkNXG PowerPack` module
+
+### API Conventions
+
+- All public API methods are in `thinknxg_powerpack/api.py` with `@frappe.whitelist()`
+- Bulk data APIs accept pipe-delimited strings (`|||`) or JSON-style lists as input to work around thinkNXG's URL parameter limitations
+- `get_bulk_item_details()` uses an optimized batch-query path by default; set `optimized=False` for the per-item fallback
+
+### CSS
+
+SCSS sources (plain CSS or nested), imported by `thinknxg_powerpack.bundle.scss` — see
+**Asset bundling** above for why the extension matters.
+
+- `thinknxg_powerpack.scss` — global compact theme (`body.compact-theme`)
+- `sales_powerup.scss` — Sales powerup info panels
+- `quick_pay.scss` — Quick Pay dialog
+- `lens_powerup.scss` — Lens powerup panels
+- `powerpack_permissions.scss` — Permission Manager page
+- `rate_price_picker.scss` — Rate Price Picker dropdown
+
+## Skill routing
+
+When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
+
+Key routing rules:
+- Product ideas/brainstorming → invoke /office-hours
+- Strategy/scope → invoke /plan-ceo-review
+- Architecture → invoke /plan-eng-review
+- Design system/plan review → invoke /design-consultation or /plan-design-review
+- Full review pipeline → invoke /autoplan
+- Bugs/errors → invoke /investigate
+- QA/testing site behavior → invoke /qa or /qa-only
+- Code review/diff check → invoke /review
+- Visual polish → invoke /design-review
+- Ship/deploy/PR → invoke /ship or /land-and-deploy
+- Save progress → invoke /context-save
+- Resume context → invoke /context-restore
+- Author a backlog-ready spec/issue → invoke /spec

@@ -1,0 +1,208 @@
+// thinknxg_powerpack/public/css/powerpack_permissions.scss
+// PowerPack Permission Manager page. SCSS with nesting — see CLAUDE.md,
+// Asset bundling, for why the extension matters.
+
+.pp-perm {
+	padding: 0;
+}
+
+.pp-perm-empty {
+	padding: 40px;
+	text-align: center;
+	color: var(--text-muted);
+}
+
+.pp-perm-filters {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: flex-end;
+	margin-bottom: 8px;
+
+	.frappe-control {
+		margin-bottom: 0;
+		min-width: 160px;
+	}
+}
+
+.pp-perm-stale {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 8px;
+	padding: 6px 10px;
+
+	.pp-perm-stale-text {
+		margin-right: auto;
+	}
+
+	.pp-stale-dismiss {
+		font-size: var(--text-lg);
+		line-height: 1;
+		padding: 0 4px;
+	}
+}
+
+.pp-perm-table {
+	.dt-cell__content {
+		font-size: var(--text-sm);
+	}
+
+	// Shift-clicking a row checkbox must not drag a text selection down the grid.
+	// mousedown's preventDefault covers the common path; this covers the rest.
+	.dt-cell--col-0 {
+		user-select: none;
+	}
+
+	// frappe-datatable reserves 16px of right padding on every cell's content for the
+	// header dropdown toggle — which these columns never render (dropdown: false). On a
+	// 36px icon column that padding pushed the glyph into overflow, so the cell's
+	// text-overflow: ellipsis painted a stray "…" beside every icon. Reclaim it for the
+	// flag columns, header and body alike; it also re-centres the body checkboxes.
+	.dt-cell__content:has(.pp-flag-head),
+	.dt-cell__content:has(.pp-flag) {
+		padding-left: 0;
+		padding-right: 0;
+		text-overflow: clip;
+	}
+
+	// Icon column headers: centre the glyph and let it inherit the header's muted colour.
+	.pp-flag-head {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+
+		.icon {
+			width: 14px;
+			height: 14px;
+		}
+	}
+
+	.pp-flag {
+		margin: 0;
+		cursor: pointer;
+	}
+
+	.pp-flag-na {
+		color: var(--text-light);
+	}
+
+	// A pending edit has to be obvious on a 13px box in both themes. The original
+	// --yellow-50 fill with a 1px --yellow-300 ring failed twice over:
+	//
+	//  1. --yellow-50 is #fffcef, which is white for practical purposes on a white grid,
+	//     and frappe does NOT remap the raw yellow scale for dark mode (desk/dark.scss
+	//     redefines only the semantic --bg-yellow / --alert-*-warning tokens), so that one
+	//     near-white value was washed out in BOTH themes.
+	//  2. It never applied to a TICKED box at all. frappe's
+	//     `input[type="checkbox"]:checked` sets `box-shadow: none; border: none` at
+	//     specificity (0,2,1), and `.pp-perm-table .pp-dirty` is only (0,2,0) — so
+	//     ticking a flag silently dropped its dirty marker and only cleared flags looked
+	//     edited. Qualifying the selector with the element and both classes takes it to
+	//     (0,3,1), which outranks frappe's rule instead of tying with it and depending on
+	//     bundle load order.
+	//
+	// The ring carries the signal, since a ticked box keeps frappe's own fill and
+	// checkmark: 2px of --yellow-600, a mid-tone that holds against white, against the
+	// blue of a checked box, and against a near-black grid.
+	input.pp-flag.pp-dirty {
+		box-shadow: inset 0 0 0 2px var(--yellow-600);
+	}
+
+	// Only an empty box gets the amber wash — background-color, never the `background`
+	// shorthand, which resets background-image and would erase frappe's checkmark.
+	input.pp-flag.pp-dirty:not(:checked) {
+		background-color: var(--yellow-200);
+	}
+
+	// Read-only viewers cannot edit, so `.pp-flag.pp-dirty` on a span is unreachable
+	// today; keep it legible if that ever changes.
+	span.pp-flag.pp-dirty {
+		background-color: var(--yellow-200);
+		box-shadow: inset 0 0 0 2px var(--yellow-600);
+		color: var(--gray-900);
+	}
+
+	.pp-standard {
+		font-style: italic;
+	}
+
+	// Staged, not saved: a rule about to be created, and one about to be deleted.
+	.pp-new {
+		font-weight: 600;
+		color: var(--green-600);
+	}
+
+	.pp-removed {
+		text-decoration: line-through;
+		color: var(--text-muted);
+	}
+}
+
+.pp-perm-footer {
+	// Sticky, not fixed. A fixed footer is positioned against the VIEWPORT, so it began
+	// at x=0 and ran underneath the desk sidebar — which paints over it (sidebar
+	// z-index 1020 vs 5), cutting off the left of the count text. Sticky keeps the
+	// footer in the content column automatically, and stays correct whether the sidebar
+	// is collapsed (50px, in flow), expanded (220px absolute overlay + placeholder,
+	// frappe/public/scss/desk/sidebar.scss:36-49,168-210) or dragged to a custom width.
+	// No magic numbers, no --sidebar-width dependency, no resize listener.
+	position: sticky;
+	bottom: 0;
+	z-index: 5;
+	display: flex;
+	align-items: center;
+	// Count first, then the bulk controls. (This row used to end with Discard/Review/
+	// Commit, which have moved to the page's action area; without them a flex-end row
+	// plus an auto margin just left a dead gap.)
+	justify-content: flex-start;
+	gap: 8px;
+	padding: 8px 16px;
+	background: var(--card-bg);
+	border-top: 1px solid var(--border-color);
+
+	.pp-perm-count {
+		color: var(--text-muted);
+	}
+
+	.pp-perm-bulk {
+		display: inline-flex;
+		gap: 6px;
+		align-items: center;
+		margin-left: 16px;
+
+		.pp-bulk-flag {
+			width: 120px;
+		}
+	}
+}
+
+.pp-perm-review {
+	.pp-review-detach {
+		border: 1px solid var(--red-300);
+		background: var(--red-50);
+		border-radius: var(--border-radius);
+		padding: 8px 12px;
+		margin-bottom: 12px;
+	}
+
+	.pp-review-remove {
+		border: 2px solid var(--red-500);
+		background: var(--red-100);
+		border-radius: var(--border-radius);
+		padding: 8px 12px;
+		margin-bottom: 12px;
+	}
+
+	.pp-review-add {
+		border: 1px solid var(--green-300);
+		background: var(--green-50);
+		border-radius: var(--border-radius);
+		padding: 8px 12px;
+		margin-bottom: 12px;
+	}
+
+	code {
+		font-size: var(--text-xs);
+	}
+}
