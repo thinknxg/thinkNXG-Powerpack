@@ -1160,7 +1160,15 @@ function show_item_dialog(frm, item_data, can_see_cost, warehouse) {
 
                 .item-row { cursor: pointer; transition: background 0.15s; }
                 .item-row:hover { background: var(--table-hover-bg, rgba(0,0,0,0.06)); color: var(--text-color); }
-                .item-row.has-qty { background: rgba(102, 126, 234, 0.08) !important; }
+                /* Highlight on the cells, not just the row: Frappe v16 paints a background on
+                   each td, which hides a row-level background (the highlight never showed). */
+                .bulk-table tbody tr.item-row.has-qty,
+                .bulk-table tbody tr.item-row.has-qty > td {
+                    background-color: rgba(102, 126, 234, 0.18) !important;
+                }
+                .bulk-table tbody tr.item-row.has-qty > td:first-child {
+                    box-shadow: inset 3px 0 0 var(--primary, #667eea);
+                }
                 .item-row.has-qty .line-total { color: var(--green-700); font-weight: 600; }
 
                 .unavailable-row { opacity: 0.5; }
