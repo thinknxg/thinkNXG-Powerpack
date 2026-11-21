@@ -102,8 +102,62 @@ const BULK_SELECTION_CONFIG = {
         item_warehouse_field: 's_warehouse',
         price_list_field: null,
         price_label: null
+    },
+    // thinkNXG Rental child tables. Same simplified (stock-style) dialog: no pricing,
+    // no warehouse. Rows go into table_field instead of 'items'.
+    'Job Type': {
+        setting_field: 'enable_rental_items_bulk_selection',
+        table_field: 'rental_items',
+        requires_warehouse: false,
+        has_taxes: false,
+        has_price: false,
+        show_profit: false,
+        show_cost: false,
+        is_stock_doctype: true,
+        is_rental_doctype: true,
+        is_purchase_doctype: false,
+        customer_field: null,
+        supplier_field: null,
+        warehouse_field: null,
+        item_warehouse_field: null,
+        price_list_field: null,
+        price_label: null
+    },
+    'Hire Order Contract': {
+        setting_field: 'enable_materials_bulk_selection',
+        table_field: 'materials',
+        // Rows that carry a job_type were generated from a Job Type's rental items
+        // (refresh_materials); only manually added rows are managed by the dialog.
+        row_filter: row => !row.job_type,
+        requires_warehouse: false,
+        has_taxes: false,
+        has_price: false,
+        show_profit: false,
+        show_cost: false,
+        is_stock_doctype: true,
+        is_rental_doctype: true,
+        is_purchase_doctype: false,
+        customer_field: null,
+        supplier_field: null,
+        warehouse_field: null,
+        item_warehouse_field: null,
+        price_list_field: null,
+        price_label: null
     }
 };
+
+// Child table the dialog reads from and writes to ('items' unless the config says otherwise)
+function get_table_field(frm) {
+    const config = BULK_SELECTION_CONFIG[frm.doctype];
+    return (config && config.table_field) || 'items';
+}
+
+// Rows of that table the dialog manages
+function get_table_rows(frm) {
+    const config = BULK_SELECTION_CONFIG[frm.doctype];
+    const rows = frm.doc[get_table_field(frm)] || [];
+    return config && config.row_filter ? rows.filter(config.row_filter) : rows;
+}
 
 // Helper function to get customer value based on doctype
 function get_customer(frm) {
@@ -182,7 +236,8 @@ function ensure_bulk_button(frm, attempt) {
     if (!config) return;
     if (frm.doc.docstatus !== 0) {
         // the grid outlives a submit, so a button added while it was a draft is still there
-        if (frm.fields_dict && frm.fields_dict.items) frm.fields_dict.items.$wrapper.find('.btn-bulk-selection').remove();
+        const table = get_table_field(frm);
+        if (frm.fields_dict && frm.fields_dict[table]) frm.fields_dict[table].$wrapper.find('.btn-bulk-selection').remove();
         return;
     }
 
@@ -191,7 +246,7 @@ function ensure_bulk_button(frm, attempt) {
 
         // Re-check: the form may have been submitted or swapped while we waited
         if (frm.doc.docstatus !== 0) return;
-        if (!frm.fields_dict || !frm.fields_dict.items) return;
+        if (!frm.fields_dict || !frm.fields_dict[get_table_field(frm)]) return;
 
         if (!add_bulk_selection_button(frm)) {
             // The grid toolbar we anchor to has not rendered yet. There is no
@@ -226,9 +281,14 @@ function has_cost_permission() {
 // Returns true once the button is in the DOM, false while the grid toolbar
 // it anchors to has not rendered yet.
 function add_bulk_selection_button(frm) {
-    frm.fields_dict.items.$wrapper.find('.btn-bulk-selection').remove();
+    const $table_wrapper = frm.fields_dict[get_table_field(frm)].$wrapper;
+    $table_wrapper.find('.btn-bulk-selection').remove();
 
-    let $add_multiple = frm.fields_dict.items.$wrapper.find('.grid-add-multiple-rows');
+    let $add_multiple = $table_wrapper.find('.grid-add-multiple-rows');
+    // Rental child tables may not render "Add Multiple"; anchor to Add Row instead
+    if (!$add_multiple.length && BULK_SELECTION_CONFIG[frm.doctype].is_rental_doctype) {
+        $add_multiple = $table_wrapper.find('.grid-add-row');
+    }
 
     if (!$add_multiple.length) return false;
 
@@ -254,7 +314,9 @@ function toggle_bulk_button(frm) {
         let disabled = false;
         let title = '';
 
-        if (config.is_stock_doctype) {
+        if (config.is_rental_doctype) {
+            // Rental child tables: no party or warehouse prerequisites
+        } else if (config.is_stock_doctype) {
             // Stock doctypes: no customer check
             if (frm.doctype === 'Stock Entry') {
                 // Stock Entry: require at least from_warehouse or to_warehouse
@@ -360,7 +422,7 @@ function set_cached_items(frm, items, warehouse) {
 function get_warehouse(frm) {
     // Get warehouse from the appropriate field based on doctype
     const config = BULK_SELECTION_CONFIG[frm.doctype];
-    return frm.doc[config.warehouse_field] || null;
+    return (config.warehouse_field && frm.doc[config.warehouse_field]) || null;
 }
 
 function show_bulk_item_selector(frm) {
@@ -370,7 +432,9 @@ function show_bulk_item_selector(frm) {
         // Stock doctypes: no customer validation needed
         let warehouse = get_warehouse(frm);
 
-        if (frm.doctype === 'Stock Entry') {
+        if (config.is_rental_doctype) {
+            // No warehouse: the dialog hides stock columns and lists every enabled stock item
+        } else if (frm.doctype === 'Stock Entry') {
             let from_wh = frm.doc.from_warehouse;
             let to_wh = frm.doc.to_warehouse;
             if (!from_wh && !to_wh) {
@@ -600,8 +664,8 @@ function show_item_dialog(frm, item_data, can_see_cost, warehouse) {
     // The server withholds valuation (null) from users who may not see cost, which the
     // role list above cannot know about (e.g. a site that restricts Item.valuation_rate).
     const cost_withheld = item_data.every(item => item.valuation_rate == null);
-    if (cost_withheld) can_see_cost = false;
-    const show_stock_cost = is_stock && !cost_withheld;
+    if (cost_withheld || config.show_cost === false) can_see_cost = false;
+    const show_stock_cost = is_stock && !cost_withheld && config.show_cost !== false;
     const is_purchase = config.is_purchase_doctype;
     const has_price = config.has_price;
 
@@ -616,7 +680,7 @@ function show_item_dialog(frm, item_data, can_see_cost, warehouse) {
         sales_history_cache: {}
     };
 
-    (frm.doc.items || []).forEach(row => {
+    get_table_rows(frm).forEach(row => {
         if (row.item_code && row.qty > 0) {
             state.quantities[row.item_code] = (state.quantities[row.item_code] || 0) + row.qty;
         }
@@ -2055,13 +2119,14 @@ function show_item_dialog(frm, item_data, can_see_cost, warehouse) {
  */
 function add_items_to_doc(frm, selected_items, warehouse) {
     const config = BULK_SELECTION_CONFIG[frm.doctype];
+    const table_field = get_table_field(frm);
 
     // Rows with no item_code are stripped after the adds, not before: the grid
     // puts a fresh blank row back while items are being added, so clearing them
     // up front leaves one behind.
     function remove_empty_rows() {
-        const grid = frm.get_field('items').grid;
-        (frm.doc.items || [])
+        const grid = frm.get_field(table_field).grid;
+        (frm.doc[table_field] || [])
             .filter(row => !row.item_code)
             .forEach(row => {
                 const grid_row = (grid.grid_rows_by_docname || {})[row.name];
@@ -2071,7 +2136,7 @@ function add_items_to_doc(frm, selected_items, warehouse) {
 
     // Step 1: Build map of existing items
     let existing_items = {};
-    (frm.doc.items || []).forEach(row => {
+    get_table_rows(frm).forEach(row => {
         if (row.item_code) {
             if (!existing_items[row.item_code]) {
                 existing_items[row.item_code] = [];
@@ -2092,7 +2157,7 @@ function add_items_to_doc(frm, selected_items, warehouse) {
     // fills on save, but no programmatic insert ever does: Stock Reconciliation's
     // item_name / stock_uom / item_group, the sales items' image, and any site
     // custom field fetching from item_code.* (client meta includes custom fields).
-    const child_doctype = frm.get_field('items').grid.doctype;
+    const child_doctype = frm.get_field(table_field).grid.doctype;
     const fetch_fields = (frappe.get_meta(child_doctype).fields || [])
         .filter(df => (df.fetch_from || '').startsWith('item_code.'))
         .map(df => ({ target: df.fieldname, source: df.fetch_from.split('.')[1] }));
@@ -2157,7 +2222,7 @@ function add_items_to_doc(frm, selected_items, warehouse) {
      */
     function add_row(item) {
         added_count++;
-        const child = frm.add_child('items', seed_values(item));
+        const child = frm.add_child(table_field, seed_values(item));
 
         return Promise.resolve(
             frm.script_manager.trigger('item_code', child.doctype, child.name)
@@ -2209,7 +2274,7 @@ function add_items_to_doc(frm, selected_items, warehouse) {
         remove_empty_rows();
 
         // Refresh the items grid to update UI
-        frm.refresh_field('items');
+        frm.refresh_field(table_field);
 
         // Show success message
         let messages = [];

@@ -43,6 +43,9 @@
   "enable_sales_invoice_bulk_selection",
   "enable_stock_reconciliation_bulk_selection",
   "enable_stock_entry_bulk_selection",
+  "column_break_bulk_2",
+  "enable_rental_items_bulk_selection",
+  "enable_materials_bulk_selection",
   "quick_pay_section",
   "enable_quick_pay",
   "enable_quick_pay_mpesa",
@@ -348,6 +351,24 @@
    "fieldname": "enable_stock_entry_bulk_selection",
    "fieldtype": "Check",
    "label": "Enable for Stock Entry"
+  },
+  {
+   "fieldname": "column_break_bulk_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "description": "Adds Bulk Selection to the Rental Items table of Job Type (thinkNXG Rental).",
+   "fieldname": "enable_rental_items_bulk_selection",
+   "fieldtype": "Check",
+   "label": "Enable Bulk Selection for Rental Items"
+  },
+  {
+   "default": "0",
+   "description": "Adds Bulk Selection to the Materials table of Hire Order Contract (thinkNXG Rental).",
+   "fieldname": "enable_materials_bulk_selection",
+   "fieldtype": "Check",
+   "label": "Enable Bulk Selection for Materials"
   },
   {
    "fieldname": "quick_pay_section",

@@ -11,7 +11,7 @@ Most features are toggled individually via **PowerPack Settings**; a few marked 
 | **Compact Theme** | Reduces line-height and input sizes for a denser layout across the entire desk |
 | **POS Powerup** | Compact/thumbnail view toggle, wildcard `%` and multi-word search, keyboard nav, barcode feedback |
 | **Sales Powerup** | Inline stock, valuation rate, last purchase price, last sale price and profit margin on Quotation / SO / SI / POS Invoice item lines |
-| **Bulk Selection** | Bulk item selector dialog on Quotation, Sales Order, Sales Invoice, Purchase Order, Stock Reconciliation and Stock Entry |
+| **Bulk Selection** | Bulk item selector dialog on Quotation, Sales Order, Sales Invoice, Purchase Order, Stock Reconciliation and Stock Entry, plus the thinkNXG Rental child tables: Rental Items (Job Type) and Materials (Hire Order Contract), each switched on separately in PowerPack Settings |
 | **Item Search Powerup** | Replaces thinkNXG ERP's default item search on all forms with multi-word (space-separated AND) and wildcard (`%`) search |
 | **Payment Reconciliation Powerup** | Zero Allocate, Zero Reconcile, 2% Allocate (Kenya VAT withholding), and enhanced doc info on the Payment Reconciliation form |
 | **Public Document Links** | Generates short public URLs (`/s/{name}-{token}`) for sharing Quotations, Invoices etc. with customers — includes a branded viewer page and optional thinkNXG Builder block |
