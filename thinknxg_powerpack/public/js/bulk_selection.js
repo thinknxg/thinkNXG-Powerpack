@@ -60,7 +60,8 @@ const BULK_SELECTION_CONFIG = {
     },
     'Sales Invoice': {
         setting_field: 'enable_sales_invoice_bulk_selection',
-        requires_warehouse: true,  // Warehouse is mandatory
+        requires_warehouse: true,  // Warehouse is mandatory...
+        warehouse_required_when: 'update_stock',  // ...but set_warehouse is hidden unless Update Stock is ticked
         has_taxes: true,
         has_price: true,
         show_profit: true,
@@ -164,6 +165,15 @@ const BULK_SELECTION_CONFIG = {
     }
 };
 
+// Whether the warehouse must be chosen before the dialog can open. A config can make
+// that conditional on a checkbox (Sales Invoice hides set_warehouse until Update Stock
+// is ticked, so demanding it there left the button permanently disabled).
+function warehouse_required(frm) {
+    const config = BULK_SELECTION_CONFIG[frm.doctype];
+    if (!config.requires_warehouse) return false;
+    return config.warehouse_required_when ? !!frm.doc[config.warehouse_required_when] : true;
+}
+
 // Child table the dialog reads from and writes to ('items' unless the config says otherwise)
 function get_table_field(frm) {
     const config = BULK_SELECTION_CONFIG[frm.doctype];
@@ -221,6 +231,7 @@ Object.keys(BULK_SELECTION_CONFIG).forEach(doctype => {
         watched_fields.push('buying_price_list', 'taxes_and_charges');
     }
 
+    if (config.warehouse_required_when) watched_fields.push(config.warehouse_required_when);
     if (config.customer_field) watched_fields.push(config.customer_field);
     if (config.supplier_field) watched_fields.push(config.supplier_field);
 
@@ -364,7 +375,7 @@ function toggle_bulk_button(frm) {
             let customer = get_customer(frm);
             let warehouse = get_warehouse(frm);
 
-            if (config.requires_warehouse) {
+            if (warehouse_required(frm)) {
                 // Sales Order & Sales Invoice: Requires both customer and warehouse
                 if (!customer && !warehouse) {
                     disabled = true;
@@ -553,7 +564,7 @@ function show_bulk_item_selector(frm) {
         let warehouse = get_warehouse(frm);
 
         // Validate warehouse for Sales Order/Invoice (where it's mandatory)
-        if (config.requires_warehouse && !warehouse) {
+        if (warehouse_required(frm) && !warehouse) {
             frappe.msgprint(__('Please select a Warehouse first'));
             return;
         }

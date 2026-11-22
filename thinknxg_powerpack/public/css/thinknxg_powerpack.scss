@@ -280,3 +280,20 @@ body.compact-theme .grid-body .editable-row .checkbox {
 /* Withholding rules sharing an item or supplier (PowerPack Settings) */
 /* The cells too: frappe paints each one with `.grid-body .grid-static-col { background-color: var(--fg-color) }`. */
 .grid-row.pp-wht-dup .data-row, .grid-row.pp-wht-dup .data-row > .col { background-color: var(--bg-yellow); }
+
+/* Bulk Selection button: unmistakable when usable, plainly muted (not a dimmed primary) while a
+   prerequisite such as Customer, Supplier or Warehouse is missing. */
+.btn-bulk-selection {
+	background-color: var(--primary, #2563eb);
+	border-color: var(--primary, #2563eb);
+	color: #fff;
+	font-weight: 600;
+}
+.btn-bulk-selection:hover:not(.disabled):not(:disabled) { filter: brightness(1.1); }
+.btn-bulk-selection.disabled, .btn-bulk-selection:disabled {
+	background-color: var(--control-bg, #f3f3f3);
+	border-color: var(--border-color, #ededed);
+	color: var(--text-muted, #7c7c7c);
+	opacity: 1;
+	cursor: not-allowed;
+}
